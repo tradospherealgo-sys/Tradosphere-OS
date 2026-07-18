@@ -1,0 +1,60 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: tradosphere
+      POSTGRES_PASSWORD: changeme
+      POSTGRES_DB: tradosphere_os
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tradosphere -d tradosphere_os"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  auth:
+    build:
+      context: .
+      dockerfile: services/auth/Dockerfile
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: info
+      DATABASE_URL: postgresql://tradosphere:changeme@postgres:5432/tradosphere_os
+      JWT_SECRET: changeme
+      AUTH_SERVICE_PORT: 4001
+    # `depends_on` alone only waits for the container to *start*, not for
+    # Postgres to actually accept connections -- `condition: service_healthy`
+    # (paired with the healthchecks above) is what makes `docker compose up`
+    # reliably produce a working auth service instead of a race.
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "4001:4001"
+
+  # Placeholder — remaining services are added here as each sprint stands
+  # them up.
+  # api:
+  #   build: ./apps/api
+  #   depends_on: [postgres, redis]
+  #   ports: ["4000:4000"]
+
+volumes:
+  postgres_data:

@@ -1,0 +1,21 @@
+{
+  "name": "@tradosphere/api",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "lint": "eslint src --ext .ts",
+    "test": "echo \"no tests yet\"",
+    "dev": "node dist/index.js"
+  },
+  "dependencies": {
+    "@tradosphere/shared-types": "workspace:*",
+    "@tradosphere/logger": "workspace:*",
+    "@tradosphere/config": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2",
+    "@types/node": "^22.10.0"
+  }
+}
