@@ -6,7 +6,7 @@ Not a dashboard. An AI Core → Operating System → API → Dashboard stack cov
 
 ## Status
 
-Scaffold only. See `SPRINT_BOOK.md` for the 10-sprint build plan, `REBUILD_LOG.md` for current state, and `EXECUTION_BOOK.md` for the session-by-session log. Build with the `ai-exec-team` skill, sprint by sprint. Audit milestones with the `ai-team` skill.
+Sprints 1–5 (Foundation, Infrastructure, Market Data, Research Engine, AI Council) are built and signed off. Sprint 5.5 (stabilization: refresh/logout lifecycle, request validation, rate limiting, real-Postgres and full-stack integration tests, CI service containers) is in progress. Sprint 6 (CIO Engine) has not started. See `SPRINT_BOOK.md` for the 10-sprint build plan, `REBUILD_LOG.md` for current state, and `EXECUTION_BOOK.md` for the session-by-session log. Build with the `ai-exec-team` skill, sprint by sprint. Audit milestones with the `ai-team` skill.
 
 ## Stack
 

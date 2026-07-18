@@ -1,0 +1,2 @@
+ALTER TABLE "sessions" ADD COLUMN "revoked_at" timestamp with time zone;--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "sessions_refresh_token_hash_unique" ON "sessions" USING btree ("refresh_token_hash");

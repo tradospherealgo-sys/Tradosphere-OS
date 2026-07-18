@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import type { UserRepository, SessionRepository, UserRecord } from '../src/repository';
+import type { UserRepository, SessionRepository, UserRecord, SessionRecord } from '../src/repository';
+import { EmailInUseError } from '../src/errors';
 
 // In-memory test doubles for the repository ports. Used instead of
 // pg-mem/drizzle here because drizzle's node-postgres driver relies on
@@ -21,6 +22,21 @@ export class InMemoryUserRepository implements UserRepository {
   }
 
   async create(input: { email: string; passwordHash: string }): Promise<UserRecord> {
+    // Task G (Sprint 5.5): mirrors DrizzleUserRepository.create()'s
+    // real-Postgres unique-constraint check (repository.ts) now that the
+    // real adapter enforces one. Before this, the fake silently allowed a
+    // second create() for an already-used email to overwrite the first
+    // map entry -- the real schema (users_email_unique) has never allowed
+    // that, so the fake and the real adapter disagreed on the same port
+    // method's contract. Kept here as a plain duplicate check (not a
+    // simulated DB error code) since that's the fake's whole job: enforce
+    // the *contract*, not replicate Postgres's wire-level error shape --
+    // the real error-code mapping is repository.ts's concern, verified
+    // against a real Postgres in repository.integration.test.ts and
+    // fullstack.integration.test.ts.
+    if (this.byEmail.has(input.email)) {
+      throw new EmailInUseError(input.email);
+    }
     const user: UserRecord = {
       id: randomUUID(),
       email: input.email,
@@ -41,9 +57,38 @@ export class InMemoryUserRepository implements UserRepository {
 }
 
 export class InMemorySessionRepository implements SessionRepository {
-  public created: Array<{ userId: string; refreshTokenHash: string; expiresAt: Date }> = [];
+  private byId = new Map<string, SessionRecord>();
+  private byHash = new Map<string, SessionRecord>();
+
+  // Test-only append-only log of every session ever created, in order --
+  // several tests assert against this directly (e.g. "exactly one session
+  // was created"). Rotation/revocation still just marks `revokedAt` on the
+  // same record (matching the real repo's semantics), so entries here stay
+  // live objects, not snapshots.
+  public created: SessionRecord[] = [];
 
   async create(input: { userId: string; refreshTokenHash: string; expiresAt: Date }): Promise<void> {
-    this.created.push(input);
+    const session: SessionRecord = {
+      id: randomUUID(),
+      userId: input.userId,
+      refreshTokenHash: input.refreshTokenHash,
+      expiresAt: input.expiresAt,
+      createdAt: new Date(),
+      revokedAt: null,
+    };
+    this.byId.set(session.id, session);
+    this.byHash.set(session.refreshTokenHash, session);
+    this.created.push(session);
+  }
+
+  async findByRefreshTokenHash(refreshTokenHash: string): Promise<SessionRecord | undefined> {
+    return this.byHash.get(refreshTokenHash);
+  }
+
+  async revoke(id: string): Promise<void> {
+    const session = this.byId.get(id);
+    if (session) {
+      session.revokedAt = new Date();
+    }
   }
 }

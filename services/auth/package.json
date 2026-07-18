@@ -15,13 +15,18 @@
     "@tradosphere/config": "workspace:*",
     "@tradosphere/database": "workspace:*",
     "@tradosphere/logger": "workspace:*",
+    "@fastify/rate-limit": "^9.1.0",
     "drizzle-orm": "^0.36.4",
     "fastify": "^4.28.1",
-    "pg": "^8.13.1"
+    "ioredis": "^5.4.1",
+    "pg": "^8.13.1",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
     "@types/pg": "^8.11.10",
+    "embedded-postgres": "18.4.0-beta.17",
+    "ioredis-mock": "^8.9.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"

@@ -1,7 +1,12 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { verifyAccessToken, verifyRefreshToken } from '@tradosphere/auth';
-import { signup, login } from '../src/auth-logic';
-import { EmailInUseError, InvalidCredentialsError } from '../src/errors';
+import { verifyAccessToken, verifyRefreshToken, signRefreshToken } from '@tradosphere/auth';
+import { signup, login, refresh, logout } from '../src/auth-logic';
+import {
+  EmailInUseError,
+  InvalidCredentialsError,
+  InvalidRefreshTokenError,
+  SessionInvalidError,
+} from '../src/errors';
 import { InMemoryUserRepository, InMemorySessionRepository } from './fakes';
 
 const JWT_SECRET = 'test-secret-not-for-prod';
@@ -100,5 +105,99 @@ describe('login', () => {
         { email: 'anshh@tradosphere.os', password: 'wrong-password' },
       ),
     ).rejects.toThrow(InvalidCredentialsError);
+  });
+});
+
+describe('refresh', () => {
+  let userRepo: InMemoryUserRepository;
+  let sessionRepo: InMemorySessionRepository;
+
+  beforeEach(() => {
+    userRepo = new InMemoryUserRepository();
+    sessionRepo = new InMemorySessionRepository();
+  });
+
+  it('issues a new token pair and rotates the session for a valid refresh token', async () => {
+    const deps = { userRepo, sessionRepo, jwtSecret: JWT_SECRET };
+    const signupResult = await signup(deps, { email: 'anshh@tradosphere.os', password: 'correct-password' });
+
+    const result = await refresh(deps, { refreshToken: signupResult.refreshToken });
+
+    expect(result.user.id).toBe(signupResult.user.id);
+    expect(result.refreshToken).not.toBe(signupResult.refreshToken);
+    expect(verifyAccessToken(result.accessToken, JWT_SECRET).sub).toBe(signupResult.user.id);
+    // Rotation issues a brand-new session rather than mutating the old row
+    // in place -- one from signup, one from this refresh call.
+    expect(sessionRepo.created).toHaveLength(2);
+  });
+
+  it('revokes the presented token in the same call that issues its replacement', async () => {
+    const deps = { userRepo, sessionRepo, jwtSecret: JWT_SECRET };
+    const signupResult = await signup(deps, { email: 'anshh@tradosphere.os', password: 'correct-password' });
+
+    await refresh(deps, { refreshToken: signupResult.refreshToken });
+
+    const originalSession = sessionRepo.created[0];
+    expect(originalSession.revokedAt).not.toBeNull();
+  });
+
+  it('rejects a reused (rotated-out) refresh token', async () => {
+    const deps = { userRepo, sessionRepo, jwtSecret: JWT_SECRET };
+    const signupResult = await signup(deps, { email: 'anshh@tradosphere.os', password: 'correct-password' });
+    await refresh(deps, { refreshToken: signupResult.refreshToken });
+
+    await expect(refresh(deps, { refreshToken: signupResult.refreshToken })).rejects.toThrow(SessionInvalidError);
+  });
+
+  it('rejects a token with a bad signature', async () => {
+    const deps = { userRepo, sessionRepo, jwtSecret: JWT_SECRET };
+    await expect(refresh(deps, { refreshToken: 'not-a-real-token' })).rejects.toThrow(InvalidRefreshTokenError);
+  });
+
+  it('rejects a validly-signed token with no matching session row', async () => {
+    // Signed with the right secret (passes JWT verification) but no
+    // session was ever created for it -- e.g. a token signed by a
+    // different service instance, or a session deleted out-of-band.
+    const deps = { userRepo, sessionRepo, jwtSecret: JWT_SECRET };
+    const orphanToken = signRefreshToken({ sub: 'nonexistent-user-id' }, JWT_SECRET);
+    await expect(refresh(deps, { refreshToken: orphanToken })).rejects.toThrow(SessionInvalidError);
+  });
+});
+
+describe('logout', () => {
+  let userRepo: InMemoryUserRepository;
+  let sessionRepo: InMemorySessionRepository;
+
+  beforeEach(() => {
+    userRepo = new InMemoryUserRepository();
+    sessionRepo = new InMemorySessionRepository();
+  });
+
+  it('revokes the session behind a valid refresh token', async () => {
+    const deps = { userRepo, sessionRepo, jwtSecret: JWT_SECRET };
+    const signupResult = await signup(deps, { email: 'anshh@tradosphere.os', password: 'correct-password' });
+
+    await logout(deps, { refreshToken: signupResult.refreshToken });
+
+    await expect(refresh(deps, { refreshToken: signupResult.refreshToken })).rejects.toThrow(SessionInvalidError);
+  });
+
+  it('is idempotent for an already-revoked token', async () => {
+    const deps = { userRepo, sessionRepo, jwtSecret: JWT_SECRET };
+    const signupResult = await signup(deps, { email: 'anshh@tradosphere.os', password: 'correct-password' });
+
+    await logout(deps, { refreshToken: signupResult.refreshToken });
+    await expect(logout(deps, { refreshToken: signupResult.refreshToken })).resolves.toBeUndefined();
+  });
+
+  it('is idempotent for an unrecognized but validly-signed token', async () => {
+    const deps = { userRepo, sessionRepo, jwtSecret: JWT_SECRET };
+    const orphanToken = signRefreshToken({ sub: 'nonexistent-user-id' }, JWT_SECRET);
+    await expect(logout(deps, { refreshToken: orphanToken })).resolves.toBeUndefined();
+  });
+
+  it('rejects a token with a bad signature', async () => {
+    const deps = { userRepo, sessionRepo, jwtSecret: JWT_SECRET };
+    await expect(logout(deps, { refreshToken: 'not-a-real-token' })).rejects.toThrow(InvalidRefreshTokenError);
   });
 });

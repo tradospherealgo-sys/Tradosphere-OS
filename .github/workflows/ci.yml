@@ -8,6 +8,40 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Sprint 5.5 Task H: a real Redis reachable at localhost:6379 (GitHub
+    # Actions maps service-container ports straight onto the runner's own
+    # localhost when the job itself doesn't run inside a `container:`, which
+    # this job doesn't) is exactly the fallback URL
+    # services/auth/test/rate-limit.test.ts and
+    # services/auth/test/fullstack.integration.test.ts's Suite B already try
+    # via `process.env.REDIS_URL ?? 'redis://localhost:6379'` before
+    # self-skipping when nothing answers. No test code changes needed here --
+    # both suites were written to run unmodified the moment a real Redis is
+    # reachable; this is that moment. `pnpm test` below (unchanged) is what
+    # actually invokes them.
+    #
+    # No `postgres:` service container is added alongside it: Tasks F/G's
+    # real-Postgres coverage (repository.integration.test.ts,
+    # fullstack.integration.test.ts's Suite A) already boots its own real
+    # Postgres via the `embedded-postgres` package -- an actual postgres
+    # binary run as a child process, not a mock -- so it needs no Docker
+    # service container and isn't blocked by anything this job is missing.
+    # Nothing in this package's test suite opens a live connection via
+    # DATABASE_URL (only migrate-cli.ts and the real service entrypoints do,
+    # neither of which `pnpm test` exercises), so a Postgres service
+    # container here would sit unused -- adding one would be scope creep
+    # against Sprint 5.5's no-new-infrastructure-without-a-consumer policy,
+    # not a fix for anything currently blocked.
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - name: Checkout
         uses: actions/checkout@v4

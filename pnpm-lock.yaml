@@ -80,6 +80,18 @@ importers:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@22.20.1)
 
+  packages/broker-core:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.0
+        version: 22.20.1
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@22.20.1)
+
   packages/config:
     devDependencies:
       '@types/node':
@@ -161,8 +173,27 @@ importers:
         specifier: ^5.7.2
         version: 5.9.3
 
+  services/ai:
+    dependencies:
+      '@tradosphere/shared-types':
+        specifier: workspace:*
+        version: link:../../packages/shared-types
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.0
+        version: 22.20.1
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@22.20.1)
+
   services/auth:
     dependencies:
+      '@fastify/rate-limit':
+        specifier: ^9.1.0
+        version: 9.1.0
       '@tradosphere/auth':
         specifier: workspace:*
         version: link:../../packages/auth
@@ -181,9 +212,15 @@ importers:
       fastify:
         specifier: ^4.28.1
         version: 4.29.1
+      ioredis:
+        specifier: ^5.4.1
+        version: 5.11.1
       pg:
         specifier: ^8.13.1
         version: 8.22.0
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
     devDependencies:
       '@types/node':
         specifier: ^22.10.0
@@ -191,9 +228,89 @@ importers:
       '@types/pg':
         specifier: ^8.11.10
         version: 8.20.0
+      embedded-postgres:
+        specifier: 18.4.0-beta.17
+        version: 18.4.0-beta.17
+      ioredis-mock:
+        specifier: ^8.9.0
+        version: 8.13.1(@types/ioredis-mock@8.2.7(ioredis@5.11.1))(ioredis@5.11.1)
       tsx:
         specifier: ^4.19.2
         version: 4.23.1
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@22.20.1)
+
+  services/market-data:
+    dependencies:
+      '@tradosphere/broker-core':
+        specifier: workspace:*
+        version: link:../../packages/broker-core
+      '@tradosphere/config':
+        specifier: workspace:*
+        version: link:../../packages/config
+      '@tradosphere/database':
+        specifier: workspace:*
+        version: link:../../packages/database
+      '@tradosphere/event-bus':
+        specifier: workspace:*
+        version: link:../../packages/event-bus
+      '@tradosphere/logger':
+        specifier: workspace:*
+        version: link:../../packages/logger
+      '@tradosphere/shared-types':
+        specifier: workspace:*
+        version: link:../../packages/shared-types
+      drizzle-orm:
+        specifier: ^0.36.4
+        version: 0.36.4(@types/pg@8.20.0)(pg@8.22.0)
+      fastify:
+        specifier: ^4.28.1
+        version: 4.29.1
+      pg:
+        specifier: ^8.13.1
+        version: 8.22.0
+      ws:
+        specifier: ^8.18.0
+        version: 8.21.1
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.0
+        version: 22.20.1
+      '@types/pg':
+        specifier: ^8.11.10
+        version: 8.20.0
+      '@types/ws':
+        specifier: ^8.5.13
+        version: 8.18.1
+      ioredis-mock:
+        specifier: ^8.9.0
+        version: 8.13.1(@types/ioredis-mock@8.2.7(ioredis@5.11.1))(ioredis@5.11.1)
+      tsx:
+        specifier: ^4.19.2
+        version: 4.23.1
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@22.20.1)
+
+  services/research:
+    dependencies:
+      '@tradosphere/database':
+        specifier: workspace:*
+        version: link:../../packages/database
+      '@tradosphere/shared-types':
+        specifier: workspace:*
+        version: link:../../packages/shared-types
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.0
+        version: 22.20.1
       typescript:
         specifier: ^5.7.2
         version: 5.9.3
@@ -205,6 +322,54 @@ packages:
 
   '@drizzle-team/brocli@0.10.2':
     resolution: {integrity: sha512-z33Il7l5dKjUgGULTqBsQBQwckHh5AbIuxhdsIxDDiZAzBOrZO6q9ogcWC65kU382AfynTfgNumVcNIjuIua6w==}
+
+  '@embedded-postgres/darwin-arm64@18.4.0-beta.17':
+    resolution: {integrity: sha512-Kg1ZMNFzkVIJs3g4V2UYEc5X005km9rGinxFBH8R1sOU2Rblvz4pt2Uf93Pu8Rk273Ue9HIdrbMPpgUqwjUi0Q==}
+    engines: {node: '>=16'}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@embedded-postgres/darwin-x64@18.4.0-beta.17':
+    resolution: {integrity: sha512-4tShSYWMxUQTSWoQAdLnHISvRj6L9gTch9/31ASJPg6wgyN64LDRwMcOINEWybM7N0ropJ3nTYhFT3UX1bKY5Q==}
+    engines: {node: '>=16'}
+    cpu: [x64]
+    os: [darwin]
+
+  '@embedded-postgres/linux-arm64@18.4.0-beta.17':
+    resolution: {integrity: sha512-TIzjtGnDGSD/LbdW0OWCEcbI+YVT0WKSfSr20TCkkP4UR8zeKe+QCZbO0/CM4hS9EWyZ4cDebjRvpRc3iMi6wg==}
+    engines: {node: '>=16'}
+    cpu: [arm64]
+    os: [linux]
+
+  '@embedded-postgres/linux-arm@18.4.0-beta.17':
+    resolution: {integrity: sha512-VuD1nFasN7yG57zpJcp6MBXM0nXqGfb8GBQV+f1FGJ17+VMNYLIFLhFp99UlY4xnWG74FQC4NPYw8eCwSTJ6qg==}
+    engines: {node: '>=16'}
+    cpu: [arm]
+    os: [linux]
+
+  '@embedded-postgres/linux-ia32@18.4.0-beta.17':
+    resolution: {integrity: sha512-aSRe4kknqRHuedtpo/rDIaqa8r9VrKIgW9p5FkJyIFqUUkIkxRqND1dg8xrDRREcSUXRJKS0x+j/AuxflgYIfg==}
+    engines: {node: '>=16'}
+    cpu: [ia32]
+    os: [linux]
+
+  '@embedded-postgres/linux-ppc64@18.4.0-beta.17':
+    resolution: {integrity: sha512-zO2RRUFdKRPplrdhmglG39VXJZzDXu3P3ONAG1sFPhGh89vbk24Btd5P7uOmQLIpWehzL0s+UqUWoeE/ZUKvgw==}
+    engines: {node: '>=16'}
+    cpu: [ppc64]
+    os: [linux]
+
+  '@embedded-postgres/linux-x64@18.4.0-beta.17':
+    resolution: {integrity: sha512-jVw/MdDtIX/vICH/DKIe6/mHpiCggdx6QVyza4vt/NbcZFsL0KhwglF6F1Koqx3gRBZ9XtN+vi63EsqSyqOSxA==}
+    engines: {node: '>=16'}
+    cpu: [x64]
+    os: [linux]
+
+  '@embedded-postgres/windows-x64@18.4.0-beta.17':
+    resolution: {integrity: sha512-AwRerliA4IGWyW5jWBvHt5vidVUSB0QQW9Tt2y7ScnmifnCb/awfxZr4BkBSTv+gNt8Djcddqs+xSF5Z6/CkTg==}
+    engines: {node: '>=16'}
+    cpu: [x64]
+    os: [win32]
 
   '@esbuild-kit/core-utils@3.3.2':
     resolution: {integrity: sha512-sPRAnw9CdSsRmEtnsl2WXWdyquogVpB3yZ3dgwJfe8zrOzTsV7cJvmwrKVa+0ma5BoiGJ+BoqkMvawbayKUsqQ==}
@@ -808,6 +973,9 @@ packages:
   '@fastify/merge-json-schemas@0.1.1':
     resolution: {integrity: sha512-fERDVz7topgNjtXsJTTW1JKLy0rhuLRcquYqNR9rF7OcVpCa2OVW49ZPDIhaRRCaUuvVxI+N416xUoF76HNSXA==}
 
+  '@fastify/rate-limit@9.1.0':
+    resolution: {integrity: sha512-h5dZWCkuZXN0PxwqaFQLxeln8/LNwQwH9popywmDCFdKfgpi4b/HoMH1lluy6P+30CG9yzzpSpwTCIPNB9T1JA==}
+
   '@humanwhocodes/config-array@0.13.0':
     resolution: {integrity: sha512-DZLEEqFWQFiyK6h5YIeynKx7JlvCYWL0cImfSRXZ9l4Sg2efkFGTuFf6vzXjK1cq6IYkU+Eg/JizXw+TD2vRNw==}
     engines: {node: '>=10.10.0'}
@@ -832,6 +1000,10 @@ packages:
 
   '@jridgewell/sourcemap-codec@1.5.5':
     resolution: {integrity: sha512-cYQ9310grqxueWbl+WuIUIaiUaDcj7WOq5fVhEljNVgRfOUhY9fy2zTvfoqWsnebh8Sl70VScFbICvJnLKB0Og==}
+
+  '@lukeed/ms@2.0.2':
+    resolution: {integrity: sha512-9I2Zn6+NJLfaGoz9jN3lpwDgAYvfGeNYdbAIjJOqzs4Tpc+VU3Jqq4IofSUBKajiDS8k9fZIg18/z13mpk1bsA==}
+    engines: {node: '>=8'}
 
   '@nodelib/fs.scandir@2.1.5':
     resolution: {integrity: sha512-vq24Bq3ym5HEQm2NKCr3yXDwjc7vTsEThRDnkp2DK9p1uqLR+DHurm/NOTo0KG7HYHU7eppKZj3MyqYuMBf62g==}
@@ -1026,6 +1198,9 @@ packages:
   '@types/pg@8.20.0':
     resolution: {integrity: sha512-bEPFOaMAHTEP1EzpvHTbmwR8UsFyHSKsRisLIHVMXnpNefSbGA1bD6CVy+qKjGSqmZqNqBDV2azOBo8TgkcVow==}
 
+  '@types/ws@8.18.1':
+    resolution: {integrity: sha512-ThVF6DCVhA8kUGy+aazFQ4kXQ7E1Ty7A3ypFOe0IcJV8O/M511G99AW24irKrW56Wt44yG9+ij8FaqoBGkuBXg==}
+
   '@typescript-eslint/eslint-plugin@7.18.0':
     resolution: {integrity: sha512-94EQTWZ40mzBc42ATNIBimBEDltSJ9RQHCC8vc/PDbxi4k8dVwUAv4o98dk50M1zB+JGFxp43FP7f8+FP8R6Sw==}
     engines: {node: ^18.18.0 || >=20.0.0}
@@ -1181,6 +1356,10 @@ packages:
   assertion-error@2.0.1:
     resolution: {integrity: sha512-Izi8RQcffqCeNVgFigKli1ssklIbpHnCYc6AknXGYoB6grJqyeby7jv12JUQgmTAnIDnbck1uxksT4dzN3PWBA==}
     engines: {node: '>=12'}
+
+  async-exit-hook@2.0.1:
+    resolution: {integrity: sha512-NW2cX8m1Q7KPA7a5M2ULQeZ2wR5qI5PAbw5L0UOMxdioVk9PMZ0h1TmyZEkPYrCvYjDlFICusOu1dlEKAAeXBw==}
+    engines: {node: '>=0.12.0'}
 
   atomic-sleep@1.0.0:
     resolution: {integrity: sha512-kNOjDqAh7px0XWNI+4QbzoiR/nTkHAWNud2uvnJquD1/x5a7EQZMJT0AczqK0Qn67oY/TTQ1LbUKajZpp3I9tQ==}
@@ -1425,6 +1604,10 @@ packages:
   ecdsa-sig-formatter@1.0.11:
     resolution: {integrity: sha512-nagl3RYrbNv6kQkeJIpt6NJZy8twLB/2vtz6yN9Z4vRKHN4/QZJIEbqohALSgwKdnksuY3k5Addp5lg8sVoVcQ==}
 
+  embedded-postgres@18.4.0-beta.17:
+    resolution: {integrity: sha512-ORT/A1YiO6ecpRHpyIIBgyCR/8ASqqYZuFw11aX9PkqTX3FUM5+9sNOXY1mGIixxsm2TWSIA5WghJEk7A5ZxVw==}
+    engines: {node: '>=16'}
+
   emoji-regex@10.6.0:
     resolution: {integrity: sha512-toUI84YS5YmxW219erniWD0CIVOo46xGKColeNQRgOzDorgBi1v4D71/OFzgD9GO2UGKIv1C3Sp8DAn0+j5w7A==}
 
@@ -1560,6 +1743,9 @@ packages:
 
   fast-uri@3.1.3:
     resolution: {integrity: sha512-i70LwGWUduXqzicKXWshooq+sWL1K3WUU5rKZNG/0i3a1OSoX3HqhH5WbWwTmqWfor4urUakGPiRQcleRZTwOg==}
+
+  fastify-plugin@4.5.1:
+    resolution: {integrity: sha512-stRHYGeuqpEZTL1Ef0Ovr2ltazUT9g844X5z/zEBFLG8RYlpDiOCIG+ATvYEp+/zmc7sN29mcIMp8gvYplYPIQ==}
 
   fastify@4.29.1:
     resolution: {integrity: sha512-m2kMNHIG92tSNWv+Z3UeTR9AWLLuo7KctC7mlFPtMEVrfjIhmQhkQnT9v15qA/BfVq3vvj134Y0jl9SBje3jXQ==}
@@ -2450,6 +2636,18 @@ packages:
   wrappy@1.0.2:
     resolution: {integrity: sha512-l4Sp/DRseor9wL6EvV2+TuQn63dMkPjZ/sp9XkghTEbV9KlPS1xUsZ3u7/IQO4wxtcFB4bgpQPRcR3QCvezPcQ==}
 
+  ws@8.21.1:
+    resolution: {integrity: sha512-+0NTnW77fFN/DjQi6k/Sq/Yvk4Sgajw7urW8V+asjXnRgDs9gyGkdb7EzgfhA4goXsRIZKE28fzIXBHEzhuiWw==}
+    engines: {node: '>=10.0.0'}
+    peerDependencies:
+      bufferutil: ^4.0.1
+      utf-8-validate: '>=5.0.2'
+    peerDependenciesMeta:
+      bufferutil:
+        optional: true
+      utf-8-validate:
+        optional: true
+
   xtend@4.0.2:
     resolution: {integrity: sha512-LKYU1iAXJXUgAXn9URjiu+MWhyUXHsvfp7mcuYm9dSUKK0/CjtrUwFAxD82/mCWbtLsGjFIad0wIsod4zrTAEQ==}
     engines: {node: '>=0.4'}
@@ -2466,9 +2664,36 @@ packages:
     resolution: {integrity: sha512-rVksvsnNCdJ/ohGc6xgPwyN8eheCxsiLM8mxuE/t/mOVqJewPuO1miLpTHQiRgTKCLexL4MeAFVagts7HmNZ2Q==}
     engines: {node: '>=10'}
 
+  zod@4.4.3:
+    resolution: {integrity: sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ==}
+
 snapshots:
 
   '@drizzle-team/brocli@0.10.2': {}
+
+  '@embedded-postgres/darwin-arm64@18.4.0-beta.17':
+    optional: true
+
+  '@embedded-postgres/darwin-x64@18.4.0-beta.17':
+    optional: true
+
+  '@embedded-postgres/linux-arm64@18.4.0-beta.17':
+    optional: true
+
+  '@embedded-postgres/linux-arm@18.4.0-beta.17':
+    optional: true
+
+  '@embedded-postgres/linux-ia32@18.4.0-beta.17':
+    optional: true
+
+  '@embedded-postgres/linux-ppc64@18.4.0-beta.17':
+    optional: true
+
+  '@embedded-postgres/linux-x64@18.4.0-beta.17':
+    optional: true
+
+  '@embedded-postgres/windows-x64@18.4.0-beta.17':
+    optional: true
 
   '@esbuild-kit/core-utils@3.3.2':
     dependencies:
@@ -2801,6 +3026,12 @@ snapshots:
     dependencies:
       fast-deep-equal: 3.1.3
 
+  '@fastify/rate-limit@9.1.0':
+    dependencies:
+      '@lukeed/ms': 2.0.2
+      fastify-plugin: 4.5.1
+      toad-cache: 3.7.4
+
   '@humanwhocodes/config-array@0.13.0':
     dependencies:
       '@humanwhocodes/object-schema': 2.0.3
@@ -2820,6 +3051,8 @@ snapshots:
   '@ioredis/commands@1.11.0': {}
 
   '@jridgewell/sourcemap-codec@1.5.5': {}
+
+  '@lukeed/ms@2.0.2': {}
 
   '@nodelib/fs.scandir@2.1.5':
     dependencies:
@@ -2952,6 +3185,10 @@ snapshots:
       '@types/node': 22.20.1
       pg-protocol: 1.15.0
       pg-types: 2.2.0
+
+  '@types/ws@8.18.1':
+    dependencies:
+      '@types/node': 22.20.1
 
   '@typescript-eslint/eslint-plugin@7.18.0(@typescript-eslint/parser@7.18.0(eslint@8.57.1)(typescript@5.9.3))(eslint@8.57.1)(typescript@5.9.3)':
     dependencies:
@@ -3126,6 +3363,8 @@ snapshots:
 
   assertion-error@2.0.1: {}
 
+  async-exit-hook@2.0.1: {}
+
   atomic-sleep@1.0.0: {}
 
   avvio@8.4.0:
@@ -3274,6 +3513,22 @@ snapshots:
   ecdsa-sig-formatter@1.0.11:
     dependencies:
       safe-buffer: 5.2.1
+
+  embedded-postgres@18.4.0-beta.17:
+    dependencies:
+      async-exit-hook: 2.0.1
+      pg: 8.22.0
+    optionalDependencies:
+      '@embedded-postgres/darwin-arm64': 18.4.0-beta.17
+      '@embedded-postgres/darwin-x64': 18.4.0-beta.17
+      '@embedded-postgres/linux-arm': 18.4.0-beta.17
+      '@embedded-postgres/linux-arm64': 18.4.0-beta.17
+      '@embedded-postgres/linux-ia32': 18.4.0-beta.17
+      '@embedded-postgres/linux-ppc64': 18.4.0-beta.17
+      '@embedded-postgres/linux-x64': 18.4.0-beta.17
+      '@embedded-postgres/windows-x64': 18.4.0-beta.17
+    transitivePeerDependencies:
+      - pg-native
 
   emoji-regex@10.6.0: {}
 
@@ -3531,6 +3786,8 @@ snapshots:
   fast-uri@2.4.2: {}
 
   fast-uri@3.1.3: {}
+
+  fastify-plugin@4.5.1: {}
 
   fastify@4.29.1:
     dependencies:
@@ -4385,6 +4642,8 @@ snapshots:
 
   wrappy@1.0.2: {}
 
+  ws@8.21.1: {}
+
   xtend@4.0.2: {}
 
   yallist@4.0.0: {}
@@ -4392,3 +4651,5 @@ snapshots:
   yaml@2.9.0: {}
 
   yocto-queue@0.1.0: {}
+
+  zod@4.4.3: {}
