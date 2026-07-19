@@ -1,5 +1,7 @@
 # Tradosphere OS — AI Team Audit: Sprints 1–5
 
+> **An updated audit covering Sprints 1–8.2 (re-verifying every finding below plus Sprint 5.5, 6, 7, 8.1–8.2) is appended at the bottom of this file, dated 2026-07-19.** Read this section for historical context; the bottom section is current.
+
 **Auditor:** AI Team review board (Nova, Aegis, Orion, Pulse, Zenith)
 **Date:** 2026-07-18
 **Audit Scope:** Sprints 1–5 (Foundation, Infrastructure, Market Data, Research Engine, AI Council)
@@ -183,3 +185,191 @@ plan against the 4 open security findings before Sprint 6 begins, if wanted.
 ## Note on methodology
 
 Every claim above traces to a file read, a command run, or a test executed during this session against `Desktop/Tradosphere-OS-current` — the source confirmed correct earlier this session via a `diff -rq` against the previously-audited stale copy. No prior session's self-report was taken at face value; build, lint, and test were all re-run from a clean install this session, and the four external-audit security findings were independently re-verified line-by-line against current source rather than assumed still valid.
+
+---
+---
+
+# Audit Update — Sprints 1–8.2
+
+**Auditor:** AI Team review board (Nova, Aegis, Orion, Pulse, Zenith)
+**Date:** 2026-07-19
+**Audit Scope:** Full re-verification of the Sprints 1–5 audit above, plus first-time audit of Sprint 5.5 (Stabilization), Sprint 6 (AI Council / CIO), Sprint 7 (Education), and Sprint 8 tasks 8.1–8.2 (Paper Trading, Journal).
+
+This is not a fresh audit written from opinion — every finding below either re-traces a claim from the Sprints 1–5 report against current source, or is backed by a file read / command run / test executed this session.
+
+---
+
+## Phase 1–2: Discovery & Evidence Summary
+
+- **Real code added since the last audit:** `services/cio` (Sprint 6 — `risk-gate.ts`'s three-level veto, `trade-idea.ts`, `scoring.ts`), `services/education` (Sprint 7 — RBAC-gated content CMS, quizzes, glossary), `services/paper-trading` (8.1 — order execution), `services/journal` (8.2 — trade/outcome journal), plus `packages/database`'s `education-schema.ts` and `journal-schema.ts`.
+- **Scaffolding only, unchanged from plan:** `services/{portfolio,analytics,broker/smc,notifications}`, `apps/{admin,docs,mobile,web}` — re-verified via direct `find` to be `.gitkeep`-only. No undocumented scope creep since the last audit.
+- **Build:** `pnpm build` — **16/16 tasks successful.**
+- **Lint:** `pnpm lint` — **16/16 clean** (FULL TURBO cache hit — a content-hash proof the tree matches the last verified-good state, not just a claim).
+- **Test:** `pnpm test` — **32/32 task-level green, 52 test files, 432 individual tests** (430 passing + 2 expected self-skips under the pre-existing Blocker B5). One `packages/auth` failure (bcrypt-hashing tests exceeding Vitest's 5000ms default) occurred under full-parallel load; isolated re-run confirmed all 21 tests pass cleanly (longest 1863ms) — see Pulse's review for why this isn't a one-off to wave away.
+- **Git — the most consequential finding of this update:** `git remote -v` is still empty; no GitHub remote has ever been configured, so CI (`ci.yml`) still has never executed a single real run. More importantly, `git log` shows exactly **4 commits total**, the newest being `"Sprint 5.5 complete: auth stabilization (Tasks A-K)"`. **None of Sprint 6, Sprint 7, or Sprint 8 (tasks 8.1–8.2) has ever been committed.** `git status` confirms `services/cio`, `journal-schema.ts`, `education-schema.ts`, and every file touched since Sprint 5.5 sit as uncommitted/untracked changes that exist only in this session's working copy. (`git fsck` also shows 2 dangling commits — minor housekeeping, not evidence of data loss, but noted for completeness.)
+
+---
+
+## Phase 3: Independent Expert Reviews
+
+### 🌌 Nova — Chief Architect
+
+**Strengths:**
+- The port/adapter discipline from the Sprints 1–5 audit hasn't just held, it's been proven at scale: `JournalRepository`/`DrizzleJournalRepository`, `MarketDataRepository`/`DrizzleMarketDataRepository`, `PriceSource`/`DatabasePriceSource`, and education's Drizzle repositories all follow the exact same shape, each with an in-memory fake for tests. Five-plus independent implementations of the same pattern is real evidence of a convention, not a one-off.
+- `services/cio/src/risk-gate.ts` is a genuinely well-designed pure function — no hidden policy state, fully parameterized, implementing the exact three-level veto the Principal specified (Decision D8) with no drift between spec and code.
+- `trade-idea.ts`'s `riskRewardRatio` is computed from the final *rounded* entry/stopLoss/target, not restated from the input ratio — a self-consistency invariant that's actually checkable in code, not just asserted in a comment. I verified this by reading the function directly.
+
+**Concerns:**
+- Still no live end-to-end wiring across services — each service is independently correct, but nothing yet calls journal → paper-trading → CIO in sequence against a real request. Correctly scoped to Sprint 9 (the API contract task), so this remains a forward gap, not a defect.
+- `services/journal` and `services/paper-trading` are library-only by design (Decision D15) — reasonable, but means Sprint 8's own top-level exit criteria 2–3 are still open until 8.3/8.4 land.
+
+**Architecture score: 82/100** (up from 78 — the pattern consistency argument is now backed by more evidence)
+
+---
+
+### 🛡️ Aegis — Chief Security Officer
+
+I re-verified all four open findings from the Sprints 1–5 audit directly against current source this session — not assumed fixed because Sprint 5.5 claimed to fix them.
+
+- **F-3 (refresh-token lifecycle) — RESOLVED, confirmed.** `services/auth/src/app.ts` now has both a `/refresh` route (line 149) and a `/logout` route (line 170), each validated with a zod schema and calling `refresh()`/`logout()` in `auth-logic.ts`. The dead-end I found last audit — a token written once and never read again — no longer exists.
+- **F-4 (bcrypt truncation on refresh tokens) — RESOLVED, confirmed, and solidly.** `packages/auth/src/refresh-token.ts` now hashes refresh tokens with SHA-256 (`createHash('sha256')`) and compares with `timingSafeEqual`, not `hashPassword()`'s bcrypt. This is the right fix, not a superficial one: deterministic hash for lookup, constant-time comparison against timing attacks, and the module's own comments explicitly reference this audit's original F-4 finding as the reason for the design.
+- **F-5 (hardcoded docker-compose secrets) — RESOLVED, confirmed.** `docker-compose.yml` now uses `${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set...}` / `${JWT_SECRET:?...}` fail-fast interpolation at every point secrets are consumed (lines 18, 56, 64, 89, 90) instead of literal `changeme` strings. `.env.example` re-confirmed clean of real values.
+- **F-6 (no validation/rate-limiting) — RESOLVED for the routes I checked.** `rateLimit` is registered and properly `await`-ed in `services/auth/src/app.ts` (the original Sprint 5.5 "missing await" bug is also fixed), and `/refresh`/`/logout` are zod-validated. I did not re-check every single endpoint on every service this session, so I'll state this as "confirmed where checked" rather than "confirmed everywhere."
+- **New finding — uncommitted history as a data-protection issue.** This isn't a code vulnerability, but three sprints of real, tested trading logic (`services/cio`'s risk engine included) currently exist in exactly one place: this ephemeral sandbox. That's a business-continuity risk I'd flag in any real security review, not just a git-hygiene nitpick.
+
+**Security score: 74/100** (up from 56 — four real, confirmed fixes, no new code-level vulnerabilities found; held back by CI-never-run and the uncommitted-history exposure)
+
+---
+
+### 📊 Orion — Chief Trading Scientist
+
+**Strengths:**
+- `services/paper-trading/src/execution.ts`'s `computeFill()` fills at exactly the latest real tick, with no invented slippage model — I read this function directly. `NoMarketDataError` is thrown loudly, by design, rather than falling back to a stale or fabricated price. Decision D14 is true in code, not just in the decision log.
+- `services/journal`'s `recordOutcome()` is TOCTOU-safe (`WHERE id = ? AND status = 'open'` guard on the update, not a read-then-write check) — a real, not cosmetic, correctness property for financial records.
+- The "never fabricate, return an explicit gap/undefined instead" discipline now spans `ResearchGap` (Sprint 4) through neutral-verdict opinions (Sprint 5) through `generateTradeIdea()` returning `undefined` on a neutral verdict (Sprint 6) — three independent implementations of the same discipline, verified by direct reads each time, not just claimed.
+
+**Concerns — unchanged from the last audit, and this is the point:**
+- **Zero real market data has ever flowed through this system, still.** `SimulatedBrokerClient` remains the only broker implementation; real SMC Global integration is still parked (Decision D5, unchanged).
+- **No backtesting exists or is claimed to exist**, still. The risk-gate and trade-idea logic are well-engineered *as software* — internally consistent, well-tested, honest about their own limits — but nothing yet demonstrates they produce trustworthy trading signals against real market behavior, because nothing real has been run through them.
+- This is exactly as expected at this stage of the roadmap (real broker integration is sequenced later), so it isn't a defect to fix now — but it's the one finding from the original audit I will not soften just because five more sprints of good engineering happened around it.
+
+**Trading/AI Logic score: 58/100** (up from 45 — the risk/journal engineering quality genuinely improved and deserves credit — but capped well below 70 because the core gap, real market data, is completely unchanged)
+
+---
+
+### ⚡ Pulse — Chief Verification Engineer
+
+**Strengths:**
+- 430/432 tests passing fresh this session (2 expected self-skips), 16/16 build, 16/16 lint, up from 171/171 tests and 24/24 tasks at the last audit — real growth, re-verified from a clean run, not carried over from a self-report.
+- The real-Postgres integration-test pattern (embedded-postgres, dedicated port per suite) that didn't exist at all during the Sprints 1–5 audit is now live for auth, education, paper-trading, and journal — this directly closes a chunk of the "DrizzleRepository has zero test coverage" finding from last time.
+- I isolated and reconfirmed *two* suspected flakes this session, not one: the `packages/auth` bcrypt-timeout failure (isolated run: 21/21 pass, longest 1863ms) and education's `seed.integration.test.ts` self-skip (isolated run: 5/5 files, 90/90 tests pass, including that exact file). Both confirmed transient contention under concurrent embedded-postgres load, not regressions.
+
+**Concerns:**
+- **`services/market-data` was never retrofitted with the integration-test pattern.** It predates the pattern (Sprint 3) and is the *only* service with a real Drizzle-backed repository (`DrizzleMarketDataRepository`) that's still exercised only through fixtures/fakes, not real Postgres. Every service built since has this coverage; this one doesn't. That inconsistency is itself worth fixing, independent of whether the code is currently correct.
+- **The bcrypt-timeout flake is now a repeat offender, not a one-off** — this is the second session in this project's history where the same class of failure (bcrypt cost-12 hashing vs. Vitest's 5000ms default timeout, under concurrent sandbox contention) has needed to be isolated and reconfirmed by hand. `packages/auth/test/password.test.ts` has no `testTimeout` override (grep-confirmed: no matches). Diagnosing this correctly twice is good verification discipline; not fixing the root cause after the second occurrence is a gap. Left as-is, it will keep happening and will eventually cost someone real time re-diagnosing a false alarm — or worse, get reflexively treated as "flaky, ignore" and mask a real failure later.
+- CI still has never executed a real run, so every one of these numbers is still a local/sandbox claim, not a from-scratch clean-environment guarantee — unchanged from the last audit.
+
+**Testing/QA score: 71/100** (up from 62 — real integration coverage where there was none, but two specific, named, fixable gaps keep it out of the 80s)
+
+---
+
+## Phase 4: Board Discussion
+
+**Nova vs. Pulse, on the uncommitted git history.** Nova's initial read: this is an environment/workflow issue (the sandbox's file-lock restriction, Blocker B3), not a reflection on code quality — the architecture score shouldn't move for it. Pulse's counter: from a verification standpoint, "tested and passing" only has lasting value if that state is durably captured; three sprints of green tests sitting only in an ephemeral sandbox is a real risk to the verification record itself. **Resolved:** both are right, and they're not actually in conflict — Architecture stays on its own merits (82/100), while the git risk is scored where it belongs, in Deployment Readiness, and flagged as the top Principal action item below.
+
+**Orion vs. Aegis, on what's most urgent.** Orion argues the zero-real-market-data gap is the most important open item because it's the platform's core value proposition and every trading decision downstream depends on it. Aegis agrees it's the correct long-term gate but argues the uncommitted-history issue is more time-sensitive right now, because it's actively compounding (growing by a sprint's worth of work each session) while real-broker integration is already correctly sequenced later in the roadmap and isn't blocking anything today. **Resolved:** both findings stand at different severities for different reasons — uncommitted history is rated HIGH because it's urgent and one Principal action away from being fully closed; zero-real-market-data is rated SCOPE because it's correctly sequenced, not neglected, and only becomes urgent when real capital enters the picture.
+
+**On the original audit's four security findings.** All four (F-3, F-4, F-5, F-6-where-checked) are confirmed resolved by direct source inspection this session, not by trusting Sprint 5.5's own completion claims. The board's judgment: this is what "conditional" in a CONDITIONAL GO verdict is supposed to mean — the conditions get checked, not assumed satisfied by the passage of time.
+
+---
+
+## Phase 5: Zenith's Final Verdict
+
+```
+AUDIT SUMMARY
+==============
+
+Project:                Tradosphere OS
+Date:                   2026-07-19
+Audit Scope:            Sprints 1-8.2, full re-verification of the 2026-07-18
+                        audit plus first-time review of Sprints 5.5-8.2
+
+SCORECARDS
+===========
+
+Architecture:           82/100  (was 78)
+Security:               74/100  (was 56)
+Trading/AI Logic:       58/100  (was 45)
+Backend Quality:        85/100  (was 80)
+Testing:                71/100  (was 62)
+Performance:            55/100  (unchanged -- largely unverified, not evidenced bad)
+Documentation:          90/100  (unchanged -- comment/decision-log discipline still excellent)
+Maintainability:        80/100  (was 75)
+Deployment Readiness:   28/100  (was 35 -- CI still never run, PLUS 3 sprints now uncommitted)
+Production Readiness:   30/100  (unchanged)
+
+OVERALL SCORE:          65/100  (was 61)
+
+FINAL VERDICT
+==============
+
+[X] CONDITIONAL GO      - Sound to continue into Sprint 8.3, conditional on
+                          the items below -- most urgently the first one,
+                          which only the Principal can act on.
+
+CRITICAL ISSUES (by severity):
+
+1. [HIGH] Sprints 6, 7, and 8 (tasks 8.1-8.2) have never been committed to
+   git. Exactly 4 commits exist total; the newest is "Sprint 5.5 complete."
+   Three sprints of real, tested code -- including the entire CIO risk
+   engine -- exist only in this session's working copy. This is a single
+   Principal action (clear the stale lock files per Blocker B3, commit,
+   push to a real remote) away from being fully closed.
+2. [MEDIUM] CI has still never executed a single real run -- no GitHub
+   remote has ever been configured. Directly blocked on issue #1.
+3. [MEDIUM] services/market-data's DrizzleMarketDataRepository is the only
+   real-Postgres-backed repository in the codebase without an integration
+   test -- every service built since Sprint 5.5 has this coverage; this
+   one predates the pattern and was never retrofitted.
+4. [LOW-MED] packages/auth/test/password.test.ts has no testTimeout
+   override and intermittently fails under concurrent sandbox load --
+   confirmed transient twice now (two separate sessions), but the root
+   cause has never been fixed, so it will keep recurring.
+5. [LOW] packages/broker-core has no retry/rate-limit/backoff wrapper --
+   not a live gap today (only SimulatedBrokerClient exists), but should
+   close before real broker integration begins, per Forge's own charter.
+6. [SCOPE, unchanged] Zero real market data has ever been processed;
+   all trading-logic verification remains fixture-only. Correctly
+   sequenced, not neglected -- but remains the right gate before any
+   real capital touches the system.
+
+RESOLVED SINCE LAST AUDIT (confirmed by direct source read, not assumed):
+- F-3: /refresh and /logout routes now exist, zod-validated.
+- F-4: refresh tokens now hashed with SHA-256 + timingSafeEqual, not bcrypt.
+- F-5: docker-compose.yml now fails loudly on missing secrets instead of
+  hardcoding "changeme".
+- F-6: rate-limiting is registered (and properly awaited) and zod
+  validation is present, at least on every route checked this session.
+
+QUICK WINS (low-effort, high-impact):
+
+- Commit and push now. Ten minutes, zero code risk, closes the single
+  highest-severity finding in this report entirely.
+- Add a testTimeout override (or a lower bcrypt cost reserved for tests)
+  to packages/auth/test/password.test.ts -- closes a flake that has now
+  been independently re-diagnosed twice instead of fixed once.
+- Port the existing *.integration.test.ts pattern -- already proven
+  working in 4 other services -- to services/market-data. The hard part
+  (designing the pattern) is already done elsewhere in this repo.
+
+PHASE 2 REMEDIATION PLAN:
+Available on request, same as last audit -- can turn the 6 open findings
+above into an owned, effort-estimated remediation sprint if wanted, before
+or interleaved with Sprint 8.3.
+```
+
+---
+
+## Note on methodology (this update)
+
+Same discipline as the original audit: every claim above traces to a file read, a command run, or a test executed this session against the current source. The four original security findings were re-verified line-by-line (not assumed fixed from Sprint 5.5's own completion notes), the two suspected test flakes were each isolated and reconfirmed by an independent re-run rather than reported as-is or dismissed, and the git/commit finding was checked directly (`git remote -v`, `git log`, `git status`) rather than inferred from REBUILD_LOG.md's own notes about Blocker B3.

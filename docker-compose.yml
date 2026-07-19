@@ -76,6 +76,28 @@ services:
     ports:
       - "4001:4001"
 
+  education:
+    build:
+      context: .
+      dockerfile: services/education/Dockerfile
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Same postgres-service-hostname reasoning as the auth block above --
+      # `postgres` is the reachable hostname on the compose network, not
+      # .env's own localhost-pointed DATABASE_URL.
+      DATABASE_URL: postgresql://${POSTGRES_USER:?POSTGRES_USER must be set -- copy .env.example to .env and fill it in}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set -- copy .env.example to .env and fill it in}@postgres:5432/${POSTGRES_DB:?POSTGRES_DB must be set -- copy .env.example to .env and fill it in}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set -- copy .env.example to .env and fill it in with a real secret, never the example placeholder}
+      EDUCATION_SERVICE_PORT: 4003
+    # No `redis` entry in depends_on -- unlike auth, education has no
+    # rate-limit plugin and never calls REDIS_URL, so waiting on redis's
+    # healthcheck here would be a false dependency.
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "4003:4003"
+
   # Placeholder — remaining services are added here as each sprint stands
   # them up.
   # api:

@@ -244,6 +244,74 @@ importers:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@22.20.1)
 
+  services/cio:
+    dependencies:
+      '@tradosphere/shared-types':
+        specifier: workspace:*
+        version: link:../../packages/shared-types
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.0
+        version: 22.20.1
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@22.20.1)
+
+  services/education:
+    dependencies:
+      '@tradosphere/auth':
+        specifier: workspace:*
+        version: link:../../packages/auth
+      '@tradosphere/config':
+        specifier: workspace:*
+        version: link:../../packages/config
+      '@tradosphere/database':
+        specifier: workspace:*
+        version: link:../../packages/database
+      '@tradosphere/logger':
+        specifier: workspace:*
+        version: link:../../packages/logger
+      '@tradosphere/service-ai':
+        specifier: workspace:*
+        version: link:../ai
+      '@tradosphere/shared-types':
+        specifier: workspace:*
+        version: link:../../packages/shared-types
+      drizzle-orm:
+        specifier: ^0.36.4
+        version: 0.36.4(@types/pg@8.20.0)(pg@8.22.0)
+      fastify:
+        specifier: ^4.28.1
+        version: 4.29.1
+      pg:
+        specifier: ^8.13.1
+        version: 8.22.0
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.0
+        version: 22.20.1
+      '@types/pg':
+        specifier: ^8.11.10
+        version: 8.20.0
+      embedded-postgres:
+        specifier: 18.4.0-beta.17
+        version: 18.4.0-beta.17
+      tsx:
+        specifier: ^4.19.2
+        version: 4.23.1
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@22.20.1)
+
   services/market-data:
     dependencies:
       '@tradosphere/broker-core':

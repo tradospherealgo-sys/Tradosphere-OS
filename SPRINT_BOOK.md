@@ -158,9 +158,9 @@ Sprints are sequential. Nothing in a later sprint gets built early — out-of-se
 | 6.5 | Atlas review: decision policy matches the "CIO gives final verdict" design from the vision doc | Atlas | 6.1–6.4 | walkthrough against vision doc confirms match |
 
 **Exit criteria:**
-- ✅/⬜ CIO produces one verdict + confidence + explainability trace from a fixed set of agent opinions
-- ✅/⬜ Risk veto demonstrably blocks a bad trade idea in a test case
-- ✅/⬜ Trade idea output includes entry/SL/target/R:R, all internally consistent
+- ✅ CIO produces one verdict + confidence + explainability trace from a fixed set of agent opinions — `cio.test.ts`'s 9-opinion fixture case, backed by `trace.test.ts`'s `reproduceVerdictFromTrace` proof
+- ✅ Risk veto demonstrably blocks a bad trade idea in a test case — `cio.test.ts`'s three Level 1 veto cases (bad R:R, drawdown at limit, invalid data), backed by `risk-gate.test.ts`'s 14 cases
+- ✅ Trade idea output includes entry/SL/target/R:R, all internally consistent — `trade-idea.test.ts`'s 22 cases, including a checked-invariant R:R computed from the returned numbers, not restated from input
 
 ---
 
@@ -179,9 +179,9 @@ Sprints are sequential. Nothing in a later sprint gets built early — out-of-se
 | 7.4 | Wire "this setup is called..." annotation into every CIO trade idea | Forge | Sprint 6, 7.3 | every generated trade idea carries an education annotation |
 
 **Exit criteria:**
-- ✅/⬜ Tutor endpoint explains a sample trade idea end-to-end in plain language
-- ✅/⬜ Glossary/course/strategy content is queryable via API
-- ✅/⬜ Every CIO trade idea includes an education annotation
+- ✅ Tutor endpoint explains a sample trade idea end-to-end in plain language — `POST /tutor/explain` (opinions → plain-language `EducationAgent` narrative) and `POST /annotations/trade-idea` (a real `TradeIdea` → the same idea back with a plain-language `educationNote` attached), both reusing Sprint 5's `EducationAgent` per task 7.3's spec, covered end-to-end over real HTTP in `app.test.ts`'s "tutor & annotation" suite (4 tests)
+- ✅ Glossary/course/strategy content is queryable via API — `seed.integration.test.ts` proves this against real Postgres + the real Fastify app: `/categories`, `/tags`, `/glossary` + `/glossary/:slug`, `/courses/:slug` + ordered `/lessons`, `/quizzes/:slug/questions` (redacted), `/strategies/:slug`, `/content/:contentType/:contentId/tags` (8 tests)
+- ✅ Every CIO trade idea includes an education annotation — Decision D13: `buildCioVerdict()` (`services/cio/src/cio.ts`) now finds the `expert: 'education'` opinion already present in its own `input.opinions` array and passes its `reasoning[0]` into `generateTradeIdea()`'s pre-existing (Sprint 6, task 6.4) `educationNote` parameter. `services/cio` and `services/education` remain fully isolated as *services* — no import or runtime call between them, Decision D12's isolation intact and Decision D9's shared-types-only dependency untouched — this reads data Sprint 6 already threaded through consensus, it does not add a service dependency. Proven by `cio.test.ts`: every generated trade idea carries the real Education opinion's `educationNote` when one is supplied (updated 9-opinion fixture case), and the note is left honestly unset — never fabricated — when no Education opinion is supplied or its `reasoning` is empty (2 new cases). 10/10 `cio.test.ts` tests, 70/70 `services/cio` tests, 382/382 full-repo tests (380 passed + 2 expected Blocker-B5 skips) pass clean.
 
 ---
 
@@ -200,9 +200,9 @@ Sprints are sequential. Nothing in a later sprint gets built early — out-of-se
 | 8.4 | `services/analytics`: win rate, realized R:R, drawdown | Forge | 8.3 | stats verifiable by hand against seeded data |
 
 **Exit criteria:**
-- ✅/⬜ Paper orders fill against real market prices, verified against a simulated feed
-- ✅/⬜ Portfolio P&L reconciles against journal entries for seeded test trades
-- ✅/⬜ Analytics numbers match hand-calculation on the same seeded dataset
+- ✅ Paper orders fill against real market prices, verified against a simulated feed — `execution.test.ts`'s 11 unit cases (exact-price stamping, `NoMarketDataError` on missing data, deterministic fills) plus `price-source.integration.test.ts`'s 6 cases against real seeded Postgres `market_ticks` rows (fed by Sprint 3's `SimulatedBrokerClient` per D5): fills are the literal tick price, never invented, never a cached/stale one
+- ⬜ Portfolio P&L reconciles against journal entries for seeded test trades
+- ⬜ Analytics numbers match hand-calculation on the same seeded dataset
 
 ---
 

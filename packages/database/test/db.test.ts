@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { newDb } from 'pg-mem';
+import { newDb, DataType } from 'pg-mem';
 import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { createDb } from '../src/client';
@@ -37,11 +37,29 @@ function loadUpSql(): string {
   );
 }
 
+// Sprint 7: education-schema.ts's search_vector columns use Postgres' native
+// `tsvector` type for full-text search (see education-schema.ts's customType
+// definition). pg-mem has no built-in tsvector support ("type \"tsvector\"
+// does not exist") -- see B8 in EXECUTION_BOOK.md. Fix: pg-mem's documented
+// registerEquivalentType() API (readme.md's macaddr example) teaches it to
+// treat tsvector as opaque text for storage/constraint purposes only. This
+// does NOT exercise real to_tsvector()/@@ query behavior -- that's deferred
+// to services/education's real-Postgres integration suite (same
+// embedded-postgres pattern as B4), since pg-mem can't run it either way.
+function registerTsvectorType(mem: ReturnType<typeof newDb>): void {
+  mem.public.registerEquivalentType({
+    name: 'tsvector',
+    equivalentTo: DataType.text,
+    isValid: () => true,
+  });
+}
+
 describe('database migrations (pg-mem, raw SQL)', () => {
   let mem: ReturnType<typeof newDb>;
 
   beforeAll(() => {
     mem = newDb({ autoCreateForeignKeyIndices: true });
+    registerTsvectorType(mem);
     let counter = 0;
     mem.public.registerFunction({
       name: 'gen_random_uuid',
@@ -61,8 +79,21 @@ describe('database migrations (pg-mem, raw SQL)', () => {
     );
     expect(tables.map((t: any) => t.table_name)).toEqual([
       'company_fundamentals',
+      'courses',
+      'education_categories',
+      'education_content_revisions',
+      'education_content_tags',
+      'education_tags',
+      'education_user_progress',
+      'glossary_terms',
+      'journal_entries',
+      'lessons',
       'market_ticks',
+      'quiz_attempts',
+      'quiz_questions',
+      'quizzes',
       'sessions',
+      'strategies',
       'users',
     ]);
   });
@@ -99,7 +130,25 @@ describe('database migrations (pg-mem, raw SQL)', () => {
   it('down migration cleanly drops everything', () => {
     expect(() =>
       mem.public.none(
-        'DROP TABLE IF EXISTS sessions CASCADE; DROP TABLE IF EXISTS users CASCADE; DROP TABLE IF EXISTS market_ticks CASCADE; DROP TABLE IF EXISTS company_fundamentals CASCADE;',
+        [
+          'DROP TABLE IF EXISTS sessions CASCADE',
+          'DROP TABLE IF EXISTS users CASCADE',
+          'DROP TABLE IF EXISTS market_ticks CASCADE',
+          'DROP TABLE IF EXISTS company_fundamentals CASCADE',
+          'DROP TABLE IF EXISTS journal_entries CASCADE',
+          'DROP TABLE IF EXISTS quiz_attempts CASCADE',
+          'DROP TABLE IF EXISTS quiz_questions CASCADE',
+          'DROP TABLE IF EXISTS quizzes CASCADE',
+          'DROP TABLE IF EXISTS education_user_progress CASCADE',
+          'DROP TABLE IF EXISTS education_content_revisions CASCADE',
+          'DROP TABLE IF EXISTS education_content_tags CASCADE',
+          'DROP TABLE IF EXISTS lessons CASCADE',
+          'DROP TABLE IF EXISTS courses CASCADE',
+          'DROP TABLE IF EXISTS strategies CASCADE',
+          'DROP TABLE IF EXISTS glossary_terms CASCADE',
+          'DROP TABLE IF EXISTS education_tags CASCADE',
+          'DROP TABLE IF EXISTS education_categories CASCADE',
+        ].join('; ') + ';',
       ),
     ).not.toThrow();
     const tables = mem.public.many(
@@ -114,6 +163,7 @@ describe('market_ticks schema (Sprint 3)', () => {
 
   beforeAll(() => {
     mem = newDb({ autoCreateForeignKeyIndices: true });
+    registerTsvectorType(mem);
     let counter = 0;
     mem.public.registerFunction({
       name: 'gen_random_uuid',
@@ -158,6 +208,7 @@ describe('company_fundamentals schema (Sprint 4 task 4.3)', () => {
 
   beforeAll(() => {
     mem = newDb({ autoCreateForeignKeyIndices: true });
+    registerTsvectorType(mem);
     let counter = 0;
     mem.public.registerFunction({
       name: 'gen_random_uuid',
@@ -196,6 +247,156 @@ describe('company_fundamentals schema (Sprint 4 task 4.3)', () => {
     ingestOnce();
     const rows = mem.public.many(`SELECT * FROM company_fundamentals WHERE symbol = 'TCS';`);
     expect(rows).toHaveLength(1);
+  });
+});
+
+describe('education schema (Sprint 7)', () => {
+  let mem: ReturnType<typeof newDb>;
+
+  beforeAll(() => {
+    mem = newDb({ autoCreateForeignKeyIndices: true });
+    registerTsvectorType(mem);
+    let counter = 0;
+    mem.public.registerFunction({
+      name: 'gen_random_uuid',
+      returns: 'uuid' as any,
+      impure: true,
+      implementation: () => `00000000-0000-4000-8000-${(++counter).toString().padStart(12, '0')}`,
+    });
+    mem.public.none(loadUpSql());
+  });
+
+  it('links a course to a category through category_id (set-null FK)', () => {
+    const [category] = mem.public.many(
+      `INSERT INTO education_categories (slug, name) VALUES ('technical-analysis', 'Technical Analysis') RETURNING id;`,
+    );
+    mem.public.none(
+      `INSERT INTO courses (slug, title, description, category_id) VALUES ('intro-ta', 'Intro to TA', 'The basics', '${category.id}');`,
+    );
+    const [course] = mem.public.many(`SELECT * FROM courses WHERE slug = 'intro-ta';`);
+    expect(course.category_id).toBe(category.id);
+  });
+
+  it('enforces the unique slug index on courses', () => {
+    expect(() =>
+      mem.public.none(
+        `INSERT INTO courses (slug, title, description) VALUES ('intro-ta', 'Duplicate slug', 'x');`,
+      ),
+    ).toThrow();
+  });
+
+  it('cascades lesson deletion when the parent course is deleted (lessons.course_id is cascade, unlike content.category_id)', () => {
+    const [course] = mem.public.many(
+      `INSERT INTO courses (slug, title, description) VALUES ('cascade-course', 'Cascade Course', 'x') RETURNING id;`,
+    );
+    mem.public.none(
+      `INSERT INTO lessons (course_id, slug, title, content) VALUES ('${course.id}', 'lesson-1', 'Lesson 1', 'content');`,
+    );
+    mem.public.none(`DELETE FROM courses WHERE id = '${course.id}';`);
+    const remaining = mem.public.many(`SELECT * FROM lessons WHERE course_id = '${course.id}';`);
+    expect(remaining).toHaveLength(0);
+  });
+
+  it('enforces the polymorphic (content_type, content_id, tag_id) unique index on content tags', () => {
+    const [tag] = mem.public.many(
+      `INSERT INTO education_tags (slug, name) VALUES ('options', 'Options') RETURNING id;`,
+    );
+    const [course] = mem.public.many(
+      `INSERT INTO courses (slug, title, description) VALUES ('tag-course', 'Tag Course', 'x') RETURNING id;`,
+    );
+    mem.public.none(
+      `INSERT INTO education_content_tags (content_type, content_id, tag_id) VALUES ('course', '${course.id}', '${tag.id}');`,
+    );
+    expect(() =>
+      mem.public.none(
+        `INSERT INTO education_content_tags (content_type, content_id, tag_id) VALUES ('course', '${course.id}', '${tag.id}');`,
+      ),
+    ).toThrow();
+  });
+
+  it('upserts per-user progress idempotently via ON CONFLICT on (user_id, content_type, content_id)', () => {
+    const [user] = mem.public.many(
+      `INSERT INTO users (email, password_hash, role) VALUES ('learner@tradosphere.os', 'x', 'viewer') RETURNING id;`,
+    );
+    const [course] = mem.public.many(
+      `INSERT INTO courses (slug, title, description) VALUES ('progress-course', 'Progress Course', 'x') RETURNING id;`,
+    );
+    const upsert = (status: string) =>
+      mem.public.none(
+        `INSERT INTO education_user_progress (user_id, content_type, content_id, status)
+         VALUES ('${user.id}', 'course', '${course.id}', '${status}')
+         ON CONFLICT (user_id, content_type, content_id) DO UPDATE SET status = EXCLUDED.status;`,
+      );
+    upsert('in_progress');
+    upsert('completed');
+    const rows = mem.public.many(`SELECT * FROM education_user_progress WHERE user_id = '${user.id}';`);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe('completed');
+  });
+
+  it('allows multiple quiz attempts per user (no uniqueness on user_id + quiz_id)', () => {
+    const [user] = mem.public.many(
+      `INSERT INTO users (email, password_hash, role) VALUES ('quiz-taker@tradosphere.os', 'x', 'viewer') RETURNING id;`,
+    );
+    const [quiz] = mem.public.many(`INSERT INTO quizzes (slug, title) VALUES ('quiz-1', 'Quiz 1') RETURNING id;`);
+    const attempt = (score: number) =>
+      mem.public.none(
+        `INSERT INTO quiz_attempts (user_id, quiz_id, score, total_questions, answers)
+         VALUES ('${user.id}', '${quiz.id}', ${score}, 5, '[]');`,
+      );
+    attempt(2);
+    attempt(4);
+    const rows = mem.public.many(`SELECT * FROM quiz_attempts WHERE user_id = '${user.id}';`);
+    expect(rows).toHaveLength(2);
+  });
+});
+
+describe('journal_entries schema (Sprint 8 task 8.2)', () => {
+  let mem: ReturnType<typeof newDb>;
+
+  beforeAll(() => {
+    mem = newDb({ autoCreateForeignKeyIndices: true });
+    registerTsvectorType(mem);
+    let counter = 0;
+    mem.public.registerFunction({
+      name: 'gen_random_uuid',
+      returns: 'uuid' as any,
+      impure: true,
+      implementation: () => `00000000-0000-4000-8000-${(++counter).toString().padStart(12, '0')}`,
+    });
+    mem.public.none(loadUpSql());
+  });
+
+  it('sets user_id to NULL when the referencing user is deleted (ON DELETE SET NULL, Decision D16)', () => {
+    const [user] = mem.public.many(
+      `INSERT INTO users (email, password_hash, role) VALUES ('journal-owner@tradosphere.os', 'x', 'trader') RETURNING id;`,
+    );
+    const [entry] = mem.public.many(
+      `INSERT INTO journal_entries (user_id, symbol, side, quantity, fill_price, filled_at, price_as_of)
+       VALUES ('${user.id}', 'RELIANCE', 'buy', 10, 2500, now(), now()) RETURNING id;`,
+    );
+
+    mem.public.none(`DELETE FROM users WHERE id = '${user.id}';`);
+
+    // Unlike sessions' cascade-on-delete FK (proven above), journal_entries is
+    // a trade history record, not a session -- the row must survive the
+    // user's deletion with user_id set to NULL, never removed.
+    const rows = mem.public.many(`SELECT * FROM journal_entries WHERE id = '${entry.id}';`);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].user_id).toBeNull();
+    expect(rows[0].symbol).toBe('RELIANCE');
+  });
+
+  it('allows every recommended*/cio* column to stay NULL when no CIO idea backs the trade', () => {
+    mem.public.none(
+      `INSERT INTO journal_entries (symbol, side, quantity, fill_price, filled_at, price_as_of)
+       VALUES ('TCS', 'sell', 5, 4100, now(), now());`,
+    );
+    const [row] = mem.public.many(`SELECT * FROM journal_entries WHERE symbol = 'TCS';`);
+    expect(row.user_id).toBeNull();
+    expect(row.recommended_direction).toBeNull();
+    expect(row.cio_verdict).toBeNull();
+    expect(row.status).toBe('open'); // schema default
   });
 });
 

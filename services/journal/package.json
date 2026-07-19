@@ -1,0 +1,25 @@
+{
+  "name": "@tradosphere/service-journal",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "lint": "eslint src --ext .ts",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@tradosphere/database": "workspace:*",
+    "@tradosphere/shared-types": "workspace:*",
+    "drizzle-orm": "^0.36.4",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/pg": "^8.11.10",
+    "embedded-postgres": "18.4.0-beta.17",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

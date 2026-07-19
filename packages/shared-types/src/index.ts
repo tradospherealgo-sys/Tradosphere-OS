@@ -139,3 +139,80 @@ export interface QuantSignalSet {
   generatedAtIso: string;
 }
 export type QuantAnalysisResult = QuantSignalSet | ResearchGap;
+
+// --- Sprint 8: Trading ---
+// Order/Fill live here (not local to services/paper-trading) because task
+// 8.2 (journal), 8.3 (portfolio), 8.4 (analytics), and Sprint 10 task 10.3
+// (paper trading/journal/portfolio screens) all consume the same shape --
+// same reasoning as TradeIdea/CioVerdict above.
+export type OrderSide = 'buy' | 'sell';
+
+export interface OrderRequest {
+  symbol: string;
+  side: OrderSide;
+  quantity: number;
+}
+
+// Decision D14: a Fill always carries the real market tick's own price and
+// timestamp (priceAsOfIso) separately from when the order itself executed
+// (filledAtIso) -- so a consumer (journal, portfolio) can always tell how
+// fresh the price behind a fill was, never just trust a single timestamp.
+export interface Fill {
+  symbol: string;
+  side: OrderSide;
+  quantity: number;
+  price: number;
+  filledAtIso: string;
+  priceAsOfIso: string;
+}
+
+// --- Sprint 8: Journal (task 8.2) ---
+// Decision D16: neither TradeIdea, CioVerdict, nor Fill is ever persisted
+// upstream of a journal entry -- a JournalEntry is the FIRST point of
+// persistence for a paper trade, snapshotting the real Fill (8.1) alongside
+// the TradeIdea/CioVerdict recommendation it was based on, exactly as
+// generated. Every `recommended*`/`cio*` field is optional: a trade placed
+// with no CIO recommendation behind it is an honest, reportable gap, never
+// a fabricated value (Delta charter rule 5).
+export type JournalEntryStatus = 'open' | 'closed';
+
+export interface JournalEntry {
+  id: string;
+  userId?: string;
+  symbol: string;
+  side: OrderSide;
+  quantity: number;
+  fillPrice: number;
+  filledAtIso: string;
+  priceAsOfIso: string;
+  recommendedDirection?: 'long' | 'short';
+  recommendedEntry?: number;
+  recommendedStopLoss?: number;
+  recommendedTarget?: number;
+  recommendedRiskRewardRatio?: number;
+  cioVerdictLabel?: Verdict;
+  cioConfidence?: number;
+  educationNote?: string;
+  recommendationGeneratedAtIso?: string;
+  status: JournalEntryStatus;
+  exitPrice?: number;
+  exitAtIso?: string;
+  realizedPnl?: number;
+  createdAtIso: string;
+}
+
+// `cioVerdict` here takes the whole Sprint 6 CioVerdict object (verdict +
+// confidence + generatedAtIso all come from it) -- composing the existing
+// type directly rather than re-flattening it into new parameter names is
+// what makes this "linking", not a parallel invented shape.
+export interface CreateJournalEntryInput {
+  userId?: string;
+  fill: Fill;
+  tradeIdea?: TradeIdea;
+  cioVerdict?: CioVerdict;
+}
+
+export interface RecordOutcomeInput {
+  exitPrice: number;
+  exitAtIso: string;
+}
