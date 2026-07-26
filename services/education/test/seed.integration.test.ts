@@ -37,10 +37,20 @@ import { buildApp } from '../src/app';
 // place that proves the seeded rows survive a real round trip through
 // Postgres and come back out correctly over HTTP.
 //
-// Port 55436 -- next free port after auth's 55433/55434 and this package's
-// own repository.integration.test.ts at 55435 (see that file's header for
-// the "give each suite its own port" convention).
-const TEST_PORT = 55436;
+// Port 55439 -- RESOLVED Blocker B13 (EXECUTION_BOOK.md): this suite
+// originally hardcoded 55436 under the same "next free port" reasoning as
+// services/paper-trading/test/price-source.integration.test.ts, and both
+// suites independently landed on the same number since neither sprint's
+// author could see the other's file. That collision surfaced only under
+// full-repo turbo concurrency (rare, non-deterministic), which is why it
+// went undetected until Sprint 8.3. Full current registry, each suite's
+// own exclusive port: auth/repository.integration=55433,
+// auth/fullstack.integration=55434, education/repository.integration=55435,
+// paper-trading/price-source.integration=55436, journal/repository.integration=55437,
+// portfolio/repository.integration=55438, education/seed.integration=55439 (this file).
+// Give any future embedded-postgres suite the next number up (55440) and
+// check this exact registry first, not just "grep the files you know about."
+const TEST_PORT = 55439;
 
 let embeddedPg: EmbeddedPostgres | undefined;
 let pool: Pool | undefined;

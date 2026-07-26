@@ -5,8 +5,18 @@ import * as marketDataSchema from './market-data-schema';
 import * as fundamentalsSchema from './fundamentals-schema';
 import * as educationSchema from './education-schema';
 import * as journalSchema from './journal-schema';
+import * as portfolioSchema from './portfolio-schema';
+import * as analyticsSchema from './analytics-schema';
 
-const schema = { ...coreSchema, ...marketDataSchema, ...fundamentalsSchema, ...educationSchema, ...journalSchema };
+const schema = {
+  ...coreSchema,
+  ...marketDataSchema,
+  ...fundamentalsSchema,
+  ...educationSchema,
+  ...journalSchema,
+  ...portfolioSchema,
+  ...analyticsSchema,
+};
 
 // Every service gets its DB handle through this factory -- never instantiate
 // drizzle directly elsewhere. Accepts any pg-compatible Pool, which is what

@@ -18,10 +18,18 @@ import { placeOrder, NoMarketDataError } from '../src/execution';
 // actually writes into in production -- rather than trusting the port's
 // contract on faith.
 //
-// Port 55436 -- next free after services/education's repository.integration
-// (55435), auth's fullstack.integration (55434) and repository.integration
-// (55433). Give any future suite that also boots embedded-postgres its own
-// next-free port rather than reusing this one.
+// Port 55436 -- this suite's exclusive port. RESOLVED Blocker B13
+// (EXECUTION_BOOK.md): services/education/test/seed.integration.test.ts
+// independently landed on this same number under identical "next free
+// port" reasoning, causing an intermittent embedded-Postgres port-bind
+// collision under full-repo turbo concurrency; seed.integration.test.ts
+// was moved to 55439 to resolve it. Full current registry, each suite's
+// own exclusive port: auth/repository.integration=55433,
+// auth/fullstack.integration=55434, education/repository.integration=55435,
+// paper-trading/price-source.integration=55436 (this file), journal/repository.integration=55437,
+// portfolio/repository.integration=55438, education/seed.integration=55439.
+// Give any future embedded-postgres suite the next number up (55440) and
+// check this exact registry first, not just "grep the files you know about."
 const TEST_PORT = 55436;
 
 let embeddedPg: EmbeddedPostgres | undefined;

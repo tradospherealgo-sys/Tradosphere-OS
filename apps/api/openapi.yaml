@@ -1,0 +1,5624 @@
+openapi: 3.0.3
+info:
+  title: Tradosphere OS Gateway API
+  version: "1.0.0"
+  description: |-
+    Unified API gateway for Tradosphere OS (Sprint 9, task 9.4). Implements
+    the architecture decided in full in Decision D19 (EXECUTION_BOOK.md)
+    before any gateway code was written.
+
+    Two route families exist side by side:
+
+    - Proxied (Auth, Market Data, Education, Portfolio, Analytics): the
+      gateway reverse-proxies to each service's existing HTTP API via a
+      hand-rolled wildcard handler that forwards the Authorization header
+      verbatim. Each upstream service remains the sole auth authority for
+      its own routes -- the gateway does NOT re-authenticate proxied
+      requests.
+    - In-process (Research, AI Council, CIO, Paper Trading, Journal): these
+      five services are library-only with no HTTP surface of their own, so
+      their routes are implemented directly on the gateway and authenticated
+      by the gateway's own requireAuth (identical factory pattern to every
+      other service in this repo).
+
+    All domain routes are versioned under /v1/<service>/.... Infra routes
+    (/health, /health/services, /metrics, /stream, /documentation,
+    /openapi.yaml) are unversioned and, along with auth's own signup/login,
+    are the only unauthenticated routes in the gateway.
+servers:
+  - url: http://localhost:4000
+    description: Local gateway (apps/api)
+
+tags:
+  - name: Infra
+    description: Health, metrics, and documentation. Unversioned, unauthenticated.
+  - name: Auth
+    description: |-
+      Proxied verbatim to services/auth. The gateway forwards the
+      Authorization header as-is and does not re-authenticate these routes.
+  - name: Market Data
+    description: Proxied verbatim to services/market-data. Not re-authenticated at the gateway.
+  - name: Education
+    description: Proxied verbatim to services/education. Not re-authenticated at the gateway.
+  - name: Portfolio
+    description: Proxied verbatim to services/portfolio. Not re-authenticated at the gateway.
+  - name: Analytics
+    description: Proxied verbatim to services/analytics. Not re-authenticated at the gateway.
+  - name: Research
+    description: |-
+      In-process on the gateway (services/research has no HTTP surface of
+      its own). Authenticated by the gateway's own requireAuth. Callers
+      supply bars/option-chain data directly in the request body -- no
+      tick-to-bar aggregation pipeline exists yet (Decision D19 sub-part 7).
+  - name: AI Council
+    description: |-
+      In-process on the gateway (services/ai has no HTTP surface of its
+      own). One route per expert agent -- there is no single "run the
+      council" endpoint. Callers sequence the agent calls they want and
+      assemble the resulting ExpertOpinion[] themselves before calling CIO.
+  - name: CIO
+    description: |-
+      In-process on the gateway (services/cio has no HTTP surface of its
+      own). Computes the consensus verdict from caller-supplied opinions
+      and trade-idea candidates, and publishes every computed verdict onto
+      CIO_VERDICTS_CHANNEL for /stream subscribers.
+  - name: Paper Trading
+    description: In-process on the gateway (services/paper-trading has no HTTP surface of its own).
+  - name: Journal
+    description: In-process on the gateway (services/journal has no HTTP surface of its own).
+
+security:
+  - bearerAuth: []
+
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      summary: Gateway liveness check
+      tags: [Infra]
+      security: []
+      responses:
+        '200':
+          description: Gateway process is up.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                required: [status]
+
+  /health/services:
+    get:
+      operationId: getHealthServices
+      summary: Upstream service health fan-out
+      description: |-
+        Gateway pings each of the five proxied services' own /health
+        endpoint and reports per-service reachability. Does not check the
+        five in-process domains (research/ai/cio/paper-trading/journal)
+        since they have no separate process to be unreachable from.
+      tags: [Infra]
+      security: []
+      responses:
+        '200':
+          description: Per-service reachability report.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  auth:
+                    type: string
+                    enum: [ok, unreachable]
+                  marketData:
+                    type: string
+                    enum: [ok, unreachable]
+                  education:
+                    type: string
+                    enum: [ok, unreachable]
+                  portfolio:
+                    type: string
+                    enum: [ok, unreachable]
+                  analytics:
+                    type: string
+                    enum: [ok, unreachable]
+
+  /metrics:
+    get:
+      operationId: getMetrics
+      summary: Prometheus metrics
+      description: |-
+        prom-client default Node process metrics plus a custom
+        http_requests_total Counter and http_request_duration_seconds
+        Histogram, recorded via an onResponse hook (Decision D19 sub-part 10).
+      tags: [Infra]
+      security: []
+      responses:
+        '200':
+          description: Prometheus text-format exposition.
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /openapi.yaml:
+    get:
+      operationId: getOpenApiSpec
+      summary: This file, served as static content
+      description: Plain GET/file-read route serving this hand-authored spec (Decision D19 sub-part 9) -- not runtime-generated.
+      tags: [Infra]
+      security: []
+      responses:
+        '200':
+          description: This OpenAPI document.
+          content:
+            application/yaml:
+              schema:
+                type: string
+
+  /documentation:
+    get:
+      operationId: getDocumentationPage
+      summary: Swagger UI
+      description: Minimal hand-rolled HTML page loading Swagger UI from a CDN, pointed at /openapi.yaml (Decision D19 sub-part 9).
+      tags: [Infra]
+      security: []
+      responses:
+        '200':
+          description: HTML page.
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /stream:
+    get:
+      operationId: streamConnect
+      summary: WebSocket upgrade -- live ticks and CIO verdicts
+      description: |-
+        Not a real HTTP GET -- OpenAPI 3.0 has no native WebSocket
+        representation, so this entry documents the upgrade contract in
+        prose (Decision D19 sub-part 5). Connect with a WebSocket client to
+        ws://<host>/stream.
+
+        A new, independently-written TickStreamServer-style layer (mirrors
+        services/market-data's own streaming layer rather than importing it)
+        broadcasts every message it receives from two Redis pub/sub channels
+        (packages/event-bus/src/channels.ts), each message tagged by a type
+        field so a single socket carries both kinds:
+
+        - MARKET_TICKS_CHANNEL ('market.ticks') -- every normalized live
+          tick published by services/market-data. Tagged type: "market.tick".
+        - CIO_VERDICTS_CHANNEL ('cio.verdicts') -- every verdict computed by
+          this gateway's own POST /v1/cio/verdict route, published
+          immediately after computing it. Tagged type: "cio.verdict". CIO
+          verdicts were never published anywhere before Sprint 9.
+
+        Authentication for the upgrade handshake and any topic-subscription
+        filtering are implementation details of task 9.3/9.13, not fixed by
+        this spec.
+      tags: [Infra]
+      security: []
+      responses:
+        '101':
+          description: Switching Protocols -- connection upgraded to WebSocket.
+
+  /v1/auth/signup:
+    post:
+      operationId: authSignup
+      summary: Create a new account and issue an access/refresh token pair
+      tags: [Auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SignupRequest'
+      responses:
+        '201':
+          description: Account created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResult'
+        '400':
+          description: Validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '409':
+          description: Email already in use.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Rate limit exceeded (Redis-backed, global to services/auth).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/auth/login:
+    post:
+      operationId: authLogin
+      summary: Authenticate with email/password and issue tokens
+      tags: [Auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Authenticated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResult'
+        '400':
+          description: Validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Invalid credentials.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Rate limit exceeded (Redis-backed, global to services/auth).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/auth/refresh:
+    post:
+      operationId: authRefresh
+      summary: Exchange a refresh token for a new access/refresh pair
+      description: Rotates the session -- the presented refresh token is revoked in the same call that issues its replacement, so it is single-use.
+      tags: [Auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+      responses:
+        '200':
+          description: New token pair issued.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResult'
+        '400':
+          description: Validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Refresh token invalid, expired, revoked, or session mismatch.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Rate limit exceeded (Redis-backed, global to services/auth).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/auth/logout:
+    post:
+      operationId: authLogout
+      summary: Revoke the session behind a refresh token
+      description: Idempotent -- an already-revoked, expired, or unrecognized-but-validly-signed token still returns 204. Only a bad signature is rejected.
+      tags: [Auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LogoutRequest'
+      responses:
+        '204':
+          description: Session revoked (or already invalid -- idempotent).
+        '400':
+          description: Validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Refresh token has a bad signature.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Rate limit exceeded (Redis-backed, global to services/auth).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/auth/me:
+    get:
+      operationId: authMe
+      summary: Current authenticated user
+      tags: [Auth]
+      responses:
+        '200':
+          description: The caller's own account.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MeResponse'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Authenticated user no longer exists.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Rate limit exceeded (Redis-backed, global to services/auth).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/auth/admin/ping:
+    get:
+      operationId: authAdminPing
+      summary: RBAC demonstration route -- requires the admin role
+      tags: [Auth]
+      responses:
+        '200':
+          description: Caller holds the admin role.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminPingResponse'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Authenticated but not an admin.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Rate limit exceeded (Redis-backed, global to services/auth).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/market-data/health:
+    get:
+      operationId: marketDataHealth
+      summary: Market-data service liveness
+      description: |-
+        This service's HTTP surface is deliberately minimal -- its real
+        interface is an internal WebSocket layer (TickStreamServer) plus
+        ingestion/import jobs running in-process. This /health route exists
+        only so orchestration (docker-compose, k8s probes) has something to
+        poll. Unrelated to the gateway's own /stream, which is an
+        independent WS layer (see /stream above).
+      tags: [Market Data]
+      security: []
+      responses:
+        '200':
+          description: Service is up.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                required: [status]
+
+  /v1/education/categories:
+    get:
+      operationId: educationListCategories
+      summary: List all content categories
+      tags: [Education]
+      security: []
+      responses:
+        '200':
+          description: All categories.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Category'
+
+    post:
+      operationId: educationCreateCategory
+      summary: Create a content category
+      description: Admin only (Cipher's charter rule 2 -- content authoring is an admin action).
+      tags: [Education]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCategoryInput'
+      responses:
+        '201':
+          description: Category created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Category'
+        '400':
+          description: Validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Authenticated but not an admin.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Slug already in use.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/education/tags:
+    get:
+      operationId: educationListTags
+      summary: List all content tags
+      tags: [Education]
+      security: []
+      responses:
+        '200':
+          description: All tags.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Tag'
+
+    post:
+      operationId: educationCreateTag
+      summary: Create a content tag
+      description: Admin only.
+      tags: [Education]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTagInput'
+      responses:
+        '201':
+          description: Tag created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tag'
+        '400':
+          description: Validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Authenticated but not an admin.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Slug already in use.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/education/glossary:
+    get:
+      operationId: educationListGlossaryTerms
+      summary: List glossary terms
+      tags: [Education]
+      security: []
+      parameters:
+        - name: categoryId
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/EducationContentStatus'
+        - name: search
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Matching glossary terms.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/GlossaryTerm'
+        '400':
+          description: Invalid filter query.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+
+    post:
+      operationId: educationCreateGlossaryTerm
+      summary: Create a glossary term
+      description: Admin only. createdBy is taken from the caller's JWT, never the body.
+      tags: [Education]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateGlossaryTermInput'
+      responses:
+        '201':
+          description: Glossary term created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GlossaryTerm'
+        '400':
+          description: Validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Authenticated but not an admin.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Slug already in use.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/education/glossary/{slug}:
+    get:
+      operationId: educationGetGlossaryTerm
+      summary: Get a glossary term by slug
+      tags: [Education]
+      security: []
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The glossary term.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GlossaryTerm'
+        '404':
+          description: No glossary term with this slug.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    patch:
+      operationId: educationUpdateGlossaryTerm
+      summary: Update a glossary term
+      description: Admin only. Slug is immutable -- omitted from the request body.
+      tags: [Education]
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateGlossaryTermInput'
+      responses:
+        '200':
+          description: Updated glossary term.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GlossaryTerm'
+        '400':
+          description: Validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Authenticated but not an admin.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: No glossary term with this slug.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    delete:
+      operationId: educationDeleteGlossaryTerm
+      summary: Delete a glossary term
+      description: Admin only. Idempotent -- no existence check before delete.
+      tags: [Education]
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Deleted.
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Authenticated but not an admin.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/education/courses:
+    get:
+      operationId: educationListCourses
+      summary: List courses
+      tags: [Education]
+      security: []
+      parameters:
+        - name: categoryId
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/EducationContentStatus'
+        - name: difficulty
+          in: query
+          schema:
+            $ref: '#/components/schemas/EducationDifficulty'
+        - name: search
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Matching courses.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Course'
+        '400':
+          description: Invalid filter query.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+
+    post:
+      operationId: educationCreateCourse
+      summary: Create a course
+      description: Admin only. createdBy is taken from the caller's JWT, never the body.
+      tags: [Education]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCourseInput'
+      responses:
+        '201':
+          description: Course created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Course'
+        '400':
+          description: Validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Authenticated but not an admin.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Slug already in use.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/education/courses/{slug}:
+    get:
+      operationId: educationGetCourse
+      summary: Get a course by slug
+      tags: [Education]
+      security: []
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The course.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Course'
+        '404':
+          description: No course with this slug.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    patch:
+      operationId: educationUpdateCourse
+      summary: Update a course
+      description: Admin only. Slug is immutable -- omitted from the request body.
+      tags: [Education]
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateCourseInput'
+      responses:
+        '200':
+          description: Updated course.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Course'
+        '400':
+          description: Validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Authenticated but not an admin.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: No course with this slug.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    delete:
+      operationId: educationDeleteCourse
+      summary: Delete a course
+      description: Admin only. Idempotent -- no existence check before delete. Cascades to the course's lessons at the database level (lessons.course_id ON DELETE CASCADE).
+      tags: [Education]
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Deleted.
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Authenticated but not an admin.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/education/courses/{courseSlug}/lessons:
+    get:
+      operationId: educationListLessons
+      summary: List lessons in a course
+      tags: [Education]
+      security: []
+      parameters:
+        - name: courseSlug
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/EducationContentStatus'
+        - name: search
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Matching lessons, ordered by orderIndex.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Lesson'
+        '400':
+          description: Invalid filter query.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '404':
+          description: No course with this courseSlug.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    post:
+      operationId: educationCreateLesson
+      summary: Create a lesson in a course
+      description: Admin only. courseId is resolved server-side from courseSlug, never taken from the body.
+      tags: [Education]
+      parameters:
+        - name: courseSlug
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateLessonInput'
+      responses:
+        '201':
+          description: Lesson created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Lesson'
+        '400':
+          description: Validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Authenticated but not an admin.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: No course with this courseSlug.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Slug already in use within this course.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/education/courses/{courseSlug}/lessons/{slug}:
+    get:
+      operationId: educationGetLesson
+      summary: Get a lesson by slug within a course
+      tags: [Education]
+      security: []
+      parameters:
+        - name: courseSlug
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The lesson.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Lesson'
+        '404':
+          description: No course with this courseSlug, or no lesson with this slug in that course.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    patch:
+      operationId: educationUpdateLesson
+      summary: Update a lesson
+      description: Admin only. Slug is immutable -- omitted from the request body.
+      tags: [Education]
+      parameters:
+        - name: courseSlug
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateLessonInput'
+      responses:
+        '200':
+          description: Updated lesson.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Lesson'
+        '400':
+          description: Validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Authenticated but not an admin.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: No course with this courseSlug, or no lesson with this slug in that course.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    delete:
+      operationId: educationDeleteLesson
+      summary: Delete a lesson
+      description: Admin only. Only the parent course's existence is checked -- the lesson delete itself is idempotent.
+      tags: [Education]
+      parameters:
+        - name: courseSlug
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Deleted.
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Authenticated but not an admin.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: No course with this courseSlug.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/education/strategies:
+    get:
+      operationId: educationListStrategies
+      summary: List strategies
+      tags: [Education]
+      security: []
+      parameters:
+        - name: categoryId
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/EducationContentStatus'
+        - name: difficulty
+          in: query
+          schema:
+            $ref: '#/components/schemas/EducationDifficulty'
+        - name: search
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Matching strategies.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Strategy'
+        '400':
+          description: Invalid filter query.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+
+    post:
+      operationId: educationCreateStrategy
+      summary: Create a strategy
+      description: Admin only. createdBy is taken from the caller's JWT, never the body.
+      tags: [Education]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateStrategyInput'
+      responses:
+        '201':
+          description: Strategy created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Strategy'
+        '400':
+          description: Validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Authenticated but not an admin.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Slug already in use.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/education/strategies/{slug}:
+    get:
+      operationId: educationGetStrategy
+      summary: Get a strategy by slug
+      tags: [Education]
+      security: []
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The strategy.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Strategy'
+        '404':
+          description: No strategy with this slug.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    patch:
+      operationId: educationUpdateStrategy
+      summary: Update a strategy
+      description: Admin only. Slug is immutable -- omitted from the request body.
+      tags: [Education]
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateStrategyInput'
+      responses:
+        '200':
+          description: Updated strategy.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Strategy'
+        '400':
+          description: Validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Authenticated but not an admin.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: No strategy with this slug.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    delete:
+      operationId: educationDeleteStrategy
+      summary: Delete a strategy
+      description: Admin only. Idempotent -- no existence check before delete.
+      tags: [Education]
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Deleted.
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Authenticated but not an admin.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/education/quizzes:
+    get:
+      operationId: educationListQuizzes
+      summary: List quizzes
+      tags: [Education]
+      security: []
+      parameters:
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/EducationContentStatus'
+        - name: courseId
+          in: query
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Matching quizzes.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Quiz'
+        '400':
+          description: Invalid filter query.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+
+    post:
+      operationId: educationCreateQuiz
+      summary: Create a quiz
+      description: |-
+        Admin only. createdBy is taken from the caller's JWT, never the body.
+        courseId/lessonId are both optional and not enforced mutually
+        exclusive at the schema level -- a quiz may close out a course, a
+        single lesson, or stand alone.
+      tags: [Education]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateQuizInput'
+      responses:
+        '201':
+          description: Quiz created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Quiz'
+        '400':
+          description: Validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Authenticated but not an admin.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Slug already in use.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/education/quizzes/{slug}:
+    get:
+      operationId: educationGetQuiz
+      summary: Get a quiz by slug
+      tags: [Education]
+      security: []
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The quiz.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Quiz'
+        '404':
+          description: No quiz with this slug.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    patch:
+      operationId: educationUpdateQuiz
+      summary: Update a quiz
+      description: Admin only. Slug is immutable -- omitted from the request body.
+      tags: [Education]
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateQuizInput'
+      responses:
+        '200':
+          description: Updated quiz.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Quiz'
+        '400':
+          description: Validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Authenticated but not an admin.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: No quiz with this slug.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    delete:
+      operationId: educationDeleteQuiz
+      summary: Delete a quiz
+      description: Admin only. Idempotent -- no existence check before delete. Cascades to the quiz's questions at the database level.
+      tags: [Education]
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Deleted.
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Authenticated but not an admin.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/education/quizzes/{slug}/questions:
+    get:
+      operationId: educationListPublicQuizQuestions
+      summary: List a quiz's questions (redacted -- no answer key)
+      description: Public and unauthenticated. Strips correctOptionIndex/explanation so a learner can browse or take the quiz without the correct answers being readable off the wire. See GET /quizzes/{slug}/answer-key for the full rows.
+      tags: [Education]
+      security: []
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Redacted questions, ordered by orderIndex.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PublicQuizQuestion'
+        '404':
+          description: No quiz with this slug.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    post:
+      operationId: educationCreateQuizQuestion
+      summary: Add a question to a quiz
+      description: Admin only. quizId is resolved server-side from slug, never taken from the body.
+      tags: [Education]
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateQuizQuestionInput'
+      responses:
+        '201':
+          description: Question created (full row, including the answer key).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuizQuestion'
+        '400':
+          description: Validation failed (including correctOptionIndex out of range).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Authenticated but not an admin.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: No quiz with this slug.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: orderIndex already used by another question on this quiz.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/education/quizzes/{slug}/answer-key:
+    get:
+      operationId: educationGetQuizAnswerKey
+      summary: List a quiz's questions with the full answer key
+      description: Admin only -- unlike GET /quizzes/{slug}/questions, this returns correctOptionIndex and explanation.
+      tags: [Education]
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Full questions, ordered by orderIndex.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/QuizQuestion'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Authenticated but not an admin.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: No quiz with this slug.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/education/quizzes/{slug}/questions/{id}:
+    patch:
+      operationId: educationUpdateQuizQuestion
+      summary: Update a quiz question
+      description: Admin only. Re-verifies the question actually belongs to the quiz named by slug before updating -- a question id copy-pasted from a different quiz is rejected as 404 rather than silently edited.
+      tags: [Education]
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateQuizQuestionInput'
+      responses:
+        '200':
+          description: Updated question (full row).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuizQuestion'
+        '400':
+          description: Validation failed (including id not a valid UUID, or correctOptionIndex out of range against the effective options).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Authenticated but not an admin.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: No quiz with this slug, or this question id does not belong to that quiz.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    delete:
+      operationId: educationDeleteQuizQuestion
+      summary: Delete a quiz question
+      description: Admin only. Same cross-quiz ownership check as PATCH.
+      tags: [Education]
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Deleted.
+        '400':
+          description: id is not a valid UUID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Authenticated but not an admin.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: No quiz with this slug, or this question id does not belong to that quiz.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/education/quizzes/{slug}/attempts:
+    post:
+      operationId: educationSubmitQuizAttempt
+      summary: Submit answers and score a quiz attempt
+      description: userId is always taken from the caller's verified JWT, never the body -- a caller can never submit an attempt as a different user.
+      tags: [Education]
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubmitQuizAttemptInput'
+      responses:
+        '201':
+          description: Scored attempt.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuizAttempt'
+        '400':
+          description: Validation failed, or the number of answers does not match the quiz's question count.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: No quiz with this slug, or an answer references a question id not on this quiz.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    get:
+      operationId: educationListQuizAttemptsForQuiz
+      summary: List the caller's attempts at a specific quiz
+      tags: [Education]
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The caller's attempts at this quiz.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/QuizAttempt'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: No quiz with this slug.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/education/attempts:
+    get:
+      operationId: educationListMyQuizAttempts
+      summary: List all of the caller's quiz attempts across every quiz
+      tags: [Education]
+      responses:
+        '200':
+          description: All of the caller's attempts.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/QuizAttempt'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/education/content/{contentType}/{contentId}/tags:
+    get:
+      operationId: educationListContentTags
+      summary: List tags attached to a piece of content
+      description: contentType/contentId are a generic polymorphic pointer -- one join table backs all five content types (glossary_term/course/lesson/strategy/quiz) rather than five parallel tables. contentId is not validated against the target table's existence, only shape (UUID).
+      tags: [Education]
+      security: []
+      parameters:
+        - name: contentType
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/EducationContentType'
+        - name: contentId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Tags attached to this content item.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ContentTag'
+        '400':
+          description: Invalid contentType or contentId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+
+    post:
+      operationId: educationAttachContentTag
+      summary: Attach a tag to a piece of content
+      description: Admin only.
+      tags: [Education]
+      parameters:
+        - name: contentType
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/EducationContentType'
+        - name: contentId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AttachTagInput'
+      responses:
+        '204':
+          description: Tag attached.
+        '400':
+          description: Invalid contentType, contentId, or tagId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Authenticated but not an admin.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: This tag is already attached to this content item.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/education/content/{contentType}/{contentId}/tags/{tagId}:
+    delete:
+      operationId: educationDetachContentTag
+      summary: Detach a tag from a piece of content
+      description: Admin only. Idempotent -- no existence check before delete.
+      tags: [Education]
+      parameters:
+        - name: contentType
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/EducationContentType'
+        - name: contentId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: tagId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Detached.
+        '400':
+          description: Invalid contentType, contentId, or tagId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Authenticated but not an admin.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/education/content/{contentType}/{contentId}/revisions:
+    get:
+      operationId: educationListContentRevisions
+      summary: List version history for a piece of content
+      description: Admin only by default (Cipher's charter rule 2) -- revision snapshots carry editedBy user ids and aren't part of the learner-facing content surface, so they don't get the public-read exception the content types themselves get.
+      tags: [Education]
+      parameters:
+        - name: contentType
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/EducationContentType'
+        - name: contentId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Revision history, one row per prior version.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ContentRevision'
+        '400':
+          description: Invalid contentType or contentId.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Authenticated but not an admin.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/education/progress/{contentType}/{contentId}:
+    put:
+      operationId: educationUpsertProgress
+      summary: Record the caller's progress on a piece of content
+      description: userId is always taken from the caller's verified JWT, never the body or params -- idempotent upsert keyed on (userId, contentType, contentId).
+      tags: [Education]
+      parameters:
+        - name: contentType
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/EducationContentType'
+        - name: contentId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpsertProgressInput'
+      responses:
+        '200':
+          description: The upserted progress row.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Progress'
+        '400':
+          description: Validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/education/progress:
+    get:
+      operationId: educationListMyProgress
+      summary: List all of the caller's progress across every content item
+      tags: [Education]
+      responses:
+        '200':
+          description: All of the caller's progress rows.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Progress'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/education/tutor/explain:
+    post:
+      operationId: educationTutorExplain
+      summary: Get a plain-language explanation of a set of expert opinions
+      description: |-
+        Task 7.3. Reuses services/ai's EducationAgent. Any authenticated
+        role may call this -- it's a learner-facing explain action, not a
+        content-authoring one. Callers assemble the opinions array
+        themselves (e.g. from prior AI Council calls); this route does not
+        call the council itself.
+      tags: [Education]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TutorExplainInput'
+      responses:
+        '200':
+          description: "The education agent's plain-language explanation, itself shaped as an ExpertOpinion (expert: education)."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExpertOpinion'
+        '400':
+          description: Validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/education/annotations/trade-idea:
+    post:
+      operationId: educationAnnotateTradeIdea
+      summary: Attach a plain-language education note to a trade idea
+      description: |-
+        Task 7.4, per Decision D12 -- a standalone capability proof for
+        Sprint 7, deliberately not wired into services/cio's own pipeline
+        (see CioVerdict.tradeIdeas, which is populated without this
+        route). Admin only, gated the same as content mutation rather than
+        opened to any authenticated user, keeping its blast radius as small
+        as the rest of this unwired capability.
+      tags: [Education]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AnnotateTradeIdeaInput'
+      responses:
+        '200':
+          description: The same trade idea with educationNote populated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TradeIdea'
+        '400':
+          description: Validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Authenticated but not an admin.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/portfolio/positions:
+    get:
+      operationId: portfolioListPositions
+      summary: Current open positions, netted per symbol
+      description: |-
+        Computed fresh from journal_entries on every call, never cached
+        (Decision D17) -- closed trades no longer contribute, and a symbol
+        whose open trades net to exactly zero is omitted rather than
+        reported as a zero-quantity row.
+      tags: [Portfolio]
+      responses:
+        '200':
+          description: The caller's open positions, sorted by symbol.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  positions:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Position'
+                required: [positions]
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/portfolio/cash:
+    get:
+      operationId: portfolioGetCash
+      summary: Current cash balance
+      tags: [Portfolio]
+      responses:
+        '200':
+          description: Starting cash plus every trade's signed cash effect.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cashBalance:
+                    type: number
+                  startingCash:
+                    type: number
+                required: [cashBalance, startingCash]
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/portfolio/pnl:
+    get:
+      operationId: portfolioGetPnl
+      summary: Realized and unrealized P&L
+      tags: [Portfolio]
+      responses:
+        '200':
+          description: |-
+            P&L breakdown from a single mark-to-market pass. Open positions
+            with no live tick are excluded from unrealizedPnl and listed in
+            missingPriceSymbols rather than silently priced at zero.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  realizedPnl:
+                    type: number
+                  unrealizedPnl:
+                    type: number
+                  missingPriceSymbols:
+                    type: array
+                    items:
+                      type: string
+                required: [realizedPnl, unrealizedPnl, missingPriceSymbols]
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/portfolio/summary:
+    get:
+      operationId: portfolioGetSummary
+      summary: Full portfolio summary (cash, positions, P&L, total equity)
+      description: Every figure comes from one mark-to-market pass, so cash, positions, and P&L can never disagree about the price used for a given symbol within the same response.
+      tags: [Portfolio]
+      responses:
+        '200':
+          description: Portfolio summary for the caller.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cashBalance:
+                    type: number
+                  positionsValue:
+                    type: number
+                  realizedPnl:
+                    type: number
+                  unrealizedPnl:
+                    type: number
+                  totalEquity:
+                    type: number
+                  positions:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Position'
+                  missingPriceSymbols:
+                    type: array
+                    items:
+                      type: string
+                required: [cashBalance, positionsValue, realizedPnl, unrealizedPnl, totalEquity, positions, missingPriceSymbols]
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/portfolio/snapshot:
+    post:
+      operationId: portfolioCreateSnapshot
+      summary: Write a point-in-time MTM snapshot (Equity Curve / Portfolio History source row)
+      description: |-
+        Refused outright with 409 if any open position has no live price --
+        a permanent history row is never written with a silently incomplete
+        equity figure (Forge charter rule 2, Decision D17). Every numeric
+        field is server-computed from journal_entries/market_ticks; the
+        body may only supply a label and/or the as-of timestamp, which
+        defaults to "now" when omitted. A request with no body at all is
+        valid and treated the same as an empty object.
+      tags: [Portfolio]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSnapshotInput'
+      responses:
+        '201':
+          description: Snapshot written.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PortfolioSnapshot'
+        '400':
+          description: Validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: One or more open positions have no live price -- snapshot refused, nothing written.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                  missingPriceSymbols:
+                    type: array
+                    items:
+                      type: string
+                required: [error, missingPriceSymbols]
+
+  /v1/portfolio/history:
+    get:
+      operationId: portfolioGetHistory
+      summary: Snapshot history (Equity Curve / Portfolio History)
+      description: Serves both the "Equity Curve" and "Portfolio History" SPRINT_BOOK.md deliverables from one mechanism (Decision D17) -- the persisted rows written by POST /v1/portfolio/snapshot.
+      tags: [Portfolio]
+      parameters:
+        - name: from
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+          description: Inclusive lower bound on asOf. Omitted means no floor.
+        - name: to
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+          description: Inclusive upper bound on asOf. Omitted means no ceiling.
+      responses:
+        '200':
+          description: Snapshots for the caller within the requested range.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  history:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/PortfolioSnapshot'
+                required: [history]
+        '400':
+          description: Validation failed (from/to not a valid ISO 8601 timestamp).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/portfolio/performance:
+    get:
+      operationId: portfolioGetPerformance
+      summary: Portfolio-level performance metrics (total return)
+      description: |-
+        Decision D17 scopes this to portfolio-level totals only -- win
+        rate, risk/reward ratio, and drawdown need a trade-by-trade time
+        series and belong to services/analytics instead.
+      tags: [Portfolio]
+      responses:
+        '200':
+          description: Performance metrics for the caller's account.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PerformanceMetrics'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/portfolio/allocation:
+    get:
+      operationId: portfolioGetAllocation
+      summary: Allocation / asset distribution across open positions
+      description: allocationPct denominator is total absolute exposure across all positions, so a fully-hedged book (equal long and short) still sums to 100%, not 0%.
+      tags: [Portfolio]
+      responses:
+        '200':
+          description: Per-symbol allocation, sorted by share of exposure descending.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  allocation:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AllocationEntry'
+                  missingPriceSymbols:
+                    type: array
+                    items:
+                      type: string
+                required: [allocation, missingPriceSymbols]
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/portfolio/risk:
+    get:
+      operationId: portfolioGetRisk
+      summary: Portfolio-level risk exposure (gross/net/leverage)
+      description: |-
+        Decision D17 scopes this to portfolio-level exposure only --
+        per-trade risk (stop-loss distance, R:R) depends on a CIO
+        recommendation snapshot that is nullable on a journal entry
+        (Decision D16), so that per-trade view is left to
+        services/analytics instead.
+      tags: [Portfolio]
+      responses:
+        '200':
+          description: Gross/net exposure, leverage ratio, and largest-position concentration.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  grossExposure:
+                    type: number
+                  netExposure:
+                    type: number
+                  leverageRatio:
+                    type: number
+                  largestPositionPct:
+                    type: number
+                  missingPriceSymbols:
+                    type: array
+                    items:
+                      type: string
+                required: [grossExposure, netExposure, leverageRatio, largestPositionPct, missingPriceSymbols]
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/analytics/win-rate:
+    get:
+      tags: [Analytics]
+      operationId: analyticsGetWinRate
+      summary: Win rate over an optional date range
+      parameters:
+        - name: from
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Win rate computed fresh from the caller's own journal entries.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  winRate:
+                    type: number
+                required:
+                  - winRate
+        '400':
+          description: Invalid from/to timestamp.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/analytics/average-return:
+    get:
+      tags: [Analytics]
+      operationId: analyticsGetAverageReturn
+      summary: Average return (absolute and percentage) over an optional date range
+      parameters:
+        - name: from
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Average return computed fresh from the caller's own journal entries.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  averageReturn:
+                    type: number
+                  averageReturnPct:
+                    type: number
+                required:
+                  - averageReturn
+                  - averageReturnPct
+        '400':
+          description: Invalid from/to timestamp.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/analytics/risk-reward:
+    get:
+      tags: [Analytics]
+      operationId: analyticsGetRiskReward
+      summary: Planned and realized risk:reward ratios over an optional date range
+      parameters:
+        - name: from
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Risk:reward ratios computed fresh from the caller's own journal entries.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  plannedRiskRewardRatio:
+                    type: number
+                  realizedRiskRewardRatio:
+                    type: number
+                required:
+                  - plannedRiskRewardRatio
+                  - realizedRiskRewardRatio
+        '400':
+          description: Invalid from/to timestamp.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/analytics/expectancy:
+    get:
+      tags: [Analytics]
+      operationId: analyticsGetExpectancy
+      summary: Trade expectancy over an optional date range
+      parameters:
+        - name: from
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Expectancy computed fresh from the caller's own journal entries.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  expectancy:
+                    type: number
+                required:
+                  - expectancy
+        '400':
+          description: Invalid from/to timestamp.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/analytics/drawdown:
+    get:
+      tags: [Analytics]
+      operationId: analyticsGetDrawdown
+      summary: Maximum drawdown percentage over an optional date range
+      parameters:
+        - name: from
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Max drawdown computed fresh from the caller's own portfolio snapshots.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  maxDrawdownPct:
+                    type: number
+                required:
+                  - maxDrawdownPct
+        '400':
+          description: Invalid from/to timestamp.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/analytics/risk-adjusted-returns:
+    get:
+      tags: [Analytics]
+      operationId: analyticsGetRiskAdjustedReturns
+      summary: Sharpe and Sortino ratios over an optional date range
+      parameters:
+        - name: from
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Risk-adjusted returns computed fresh from the caller's own portfolio snapshots. Risk-free rate defaults to 0 (no rate feed exists).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RiskAdjustedReturns'
+        '400':
+          description: Invalid from/to timestamp.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/analytics/performance:
+    get:
+      tags: [Analytics]
+      operationId: analyticsGetPerformance
+      summary: Combined rollup of every granular stat over an optional date range
+      parameters:
+        - name: from
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: The same computeFullStatSet() result POST /v1/analytics/reports would persist at this moment.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FullStatSet'
+        '400':
+          description: Invalid from/to timestamp.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/analytics/monthly-reports:
+    get:
+      tags: [Analytics]
+      operationId: analyticsGetMonthlyReports
+      summary: Stats broken down by UTC calendar month
+      parameters:
+        - name: from
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: One entry per UTC calendar month with at least one trade filled in it.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  reports:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/MonthlyReport'
+                required:
+                  - reports
+        '400':
+          description: Invalid from/to timestamp.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/analytics/strategy-stats:
+    get:
+      tags: [Analytics]
+      operationId: analyticsGetStrategyStats
+      summary: Stats grouped by strategy proxy (CIO verdict label + recommended direction)
+      parameters:
+        - name: from
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Largest group first; ties broken alphabetically by strategy key.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  strategies:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/StrategyStats'
+                required:
+                  - strategies
+        '400':
+          description: Invalid from/to timestamp.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/analytics/trade-distribution:
+    get:
+      tags: [Analytics]
+      operationId: analyticsGetTradeDistribution
+      summary: Closed-trade realized P&L distribution across equal-width buckets
+      parameters:
+        - name: from
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - name: buckets
+          in: query
+          required: false
+          description: Overrides the default of 10 equal-width buckets.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+      responses:
+        '200':
+          description: Bucket boundaries are derived from the caller's own real min/max realized P&L, never a fixed hardcoded threshold.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TradeDistribution'
+        '400':
+          description: Invalid from/to timestamp or buckets value.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/analytics/heatmap:
+    get:
+      tags: [Analytics]
+      operationId: analyticsGetHeatmap
+      summary: Day-of-week x session-window performance heatmap
+      parameters:
+        - name: from
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Always 28 cells (7 days x 4 sessions), even when a cell has zero trades.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cells:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/HeatmapCell'
+                required:
+                  - cells
+        '400':
+          description: Invalid from/to timestamp.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/analytics/session-analysis:
+    get:
+      tags: [Analytics]
+      operationId: analyticsGetSessionAnalysis
+      summary: Stats broken down by fixed UTC-hour session window
+      parameters:
+        - name: from
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Always exactly 4 rows, one per session window, even when a window has zero trades.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sessions:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/SessionStats'
+                required:
+                  - sessions
+        '400':
+          description: Invalid from/to timestamp.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/analytics/instrument-analysis:
+    get:
+      tags: [Analytics]
+      operationId: analyticsGetInstrumentAnalysis
+      summary: Stats grouped by traded symbol
+      parameters:
+        - name: from
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Most-traded symbol first; ties broken alphabetically.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  instruments:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/InstrumentStats'
+                required:
+                  - instruments
+        '400':
+          description: Invalid from/to timestamp.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/analytics/reports:
+    post:
+      tags: [Analytics]
+      operationId: analyticsCreateReport
+      summary: Generate and persist a point-in-time report
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAnalyticsReportInput'
+      responses:
+        '201':
+          description: The persisted report, holding exactly the stat set GET /v1/analytics/performance would have returned for the same range at this moment.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsReport'
+        '400':
+          description: Invalid label/from/to/asOf.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    get:
+      tags: [Analytics]
+      operationId: analyticsListReports
+      summary: List the caller's previously generated reports
+      parameters:
+        - name: from
+          in: query
+          required: false
+          description: Filters by each report's own asOf, not by the range it covers.
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Newest report first (descending by asOf).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  reports:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AnalyticsReport'
+                required:
+                  - reports
+        '400':
+          description: Invalid from/to timestamp.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/analytics/reports/{id}:
+    get:
+      tags: [Analytics]
+      operationId: analyticsGetReportById
+      summary: Fetch one previously generated report by id
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The report, if it exists and belongs to the caller.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsReport'
+        '400':
+          description: Malformed id (must be a UUID).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: "No report with this id exists, or it belongs to a different user -- the two cases are deliberately indistinguishable."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/research/technical:
+    post:
+      tags: [Research]
+      operationId: researchAnalyzeTechnical
+      summary: Compute RSI/EMA/MACD, volume, and breakout signals from caller-supplied OHLCV bars
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AnalyzeTechnicalInput'
+      responses:
+        '200':
+          description: "Either a computed TechnicalIndicatorSet (status: ok) or a ResearchGap (status: gap) if bars are insufficient."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TechnicalAnalysisResult'
+        '400':
+          description: Validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/research/options:
+    post:
+      tags: [Research]
+      operationId: researchAnalyzeOptions
+      summary: Compute put/call ratio and open-interest-shift interpretation from a caller-supplied option chain snapshot
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OptionChainSnapshot'
+      responses:
+        '200':
+          description: "Either a computed OptionChainAnalysis (status: ok) or a ResearchGap (status: gap) if the chain is empty or has no call-side open interest."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OptionAnalysisResult'
+        '400':
+          description: Validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/research/fundamentals/{symbol}:
+    get:
+      tags: [Research]
+      operationId: researchFundamentals
+      summary: Fetch the most recently ingested fundamentals verdict for a symbol
+      parameters:
+        - name: symbol
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: "Either a computed FundamentalAnalysis (status: ok) or a ResearchGap (status: gap, reason: missing_fundamentals) if nothing has been ingested for this symbol."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FundamentalAnalysisResult'
+        '400':
+          description: Malformed or empty symbol.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/research/sector:
+    post:
+      tags: [Research]
+      operationId: researchAnalyzeSector
+      summary: Compute relative strength and rotation for a sector against a benchmark from caller-supplied bars
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AnalyzeSectorInput'
+      responses:
+        '200':
+          description: "Either a computed SectorAnalysis (status: ok) or a ResearchGap (status: gap, reason: missing_sector_data) if either series has fewer than 2 bars."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SectorAnalysisResult'
+        '400':
+          description: Validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/research/quant:
+    post:
+      tags: [Research]
+      operationId: researchAnalyzeQuant
+      summary: Compute a mean-reversion z-score and annualized volatility from caller-supplied bars
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AnalyzeQuantInput'
+      responses:
+        '200':
+          description: "Either a computed QuantSignalSet (status: ok) or a ResearchGap (status: gap) if fewer than period+1 bars are supplied."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuantAnalysisResult'
+        '400':
+          description: Validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/ai/agents/technical:
+    post:
+      tags: [AI Council]
+      operationId: aiAgentTechnical
+      summary: Run the Technical expert agent over a technical analysis result
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TechnicalAnalysisResult'
+      responses:
+        '200':
+          description: The Technical expert's opinion.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExpertOpinion'
+        '400':
+          description: Validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/ai/agents/options:
+    post:
+      tags: [AI Council]
+      operationId: aiAgentOptions
+      summary: Run the Options expert agent over an option chain analysis result
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OptionAnalysisResult'
+      responses:
+        '200':
+          description: The Options expert's opinion.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExpertOpinion'
+        '400':
+          description: Validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/ai/agents/sector:
+    post:
+      tags: [AI Council]
+      operationId: aiAgentSector
+      summary: Run the Sector expert agent over a sector analysis result
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SectorAnalysisResult'
+      responses:
+        '200':
+          description: The Sector expert's opinion.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExpertOpinion'
+        '400':
+          description: Validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/ai/agents/quant:
+    post:
+      tags: [AI Council]
+      operationId: aiAgentQuant
+      summary: Run the Quant expert agent over a quant analysis result
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QuantAnalysisResult'
+      responses:
+        '200':
+          description: The Quant expert's opinion.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExpertOpinion'
+        '400':
+          description: Validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/ai/agents/fundamental:
+    post:
+      tags: [AI Council]
+      operationId: aiAgentFundamental
+      summary: Run the Fundamental expert agent over a fundamental analysis result
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FundamentalAnalysisResult'
+      responses:
+        '200':
+          description: The Fundamental expert's opinion.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExpertOpinion'
+        '400':
+          description: Validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/ai/agents/indices:
+    post:
+      tags: [AI Council]
+      operationId: aiAgentIndices
+      summary: Run the Indices expert agent over a technical analysis result
+      description: "Decision D7: services/research has no dedicated indices module -- analyzeTechnical() is symbol-agnostic and already works on an index's OHLCV series, so this agent takes the same TechnicalAnalysisResult as /v1/ai/agents/technical and delegates to the Technical agent's interpretation, only relabeling the expert field."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TechnicalAnalysisResult'
+      responses:
+        '200':
+          description: The Indices expert's opinion.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExpertOpinion'
+        '400':
+          description: Validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/ai/agents/strategy:
+    post:
+      tags: [AI Council]
+      operationId: aiAgentStrategy
+      summary: Run the Strategy synthesis agent over other experts' opinions
+      description: Confidence-weights the caller-supplied opinions into a single synthesized verdict. Returns a neutral, 0-confidence opinion if opinions is empty rather than failing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StrategyAgentInput'
+      responses:
+        '200':
+          description: The Strategy expert's synthesized opinion.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExpertOpinion'
+        '400':
+          description: Validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/ai/agents/risk:
+    post:
+      tags: [AI Council]
+      operationId: aiAgentRisk
+      summary: Run the Risk synthesis agent over other experts' opinions and optional volatility
+      description: "Expresses risk on the same five-point Verdict scale as every other agent: bullish/bearish here mean favorable/unfavorable risk, not market direction."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RiskAgentInput'
+      responses:
+        '200':
+          description: The Risk expert's opinion.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExpertOpinion'
+        '400':
+          description: Validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/ai/agents/education:
+    post:
+      tags: [AI Council]
+      operationId: aiAgentEducation
+      summary: Run the Education agent to turn other experts' opinions into a plain-language narrative
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EducationAgentInput'
+      responses:
+        '200':
+          description: The Education agent's plain-language opinion.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExpertOpinion'
+        '400':
+          description: Validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/cio/verdict:
+    post:
+      tags: [CIO]
+      operationId: cioBuildVerdict
+      summary: Compute the consensus verdict, risk-gated trade idea, and explainability trace from caller-supplied expert opinions
+      description: "Publishes the computed verdict onto CIO_VERDICTS_CHANNEL (tagged type: cio.verdict) immediately after computing it, for /stream subscribers. portfolio (PortfolioRiskContext) is supplied directly in the request body -- there is no auto-wiring to live services/portfolio state yet (Decision D19 sub-part 8)."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BuildCioVerdictInput'
+      responses:
+        '200':
+          description: "The computed verdict. tradeIdeas is empty whenever the risk gate's Level 1 veto fired (riskGate.approved is false) -- the CIO never overrides a Level 1 veto."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CioVerdictWithTrace'
+        '400':
+          description: Validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/paper-trading/orders:
+    post:
+      tags: [Paper Trading]
+      operationId: paperTradingPlaceOrder
+      summary: Place a simulated market order, filled at the latest real tick price
+      description: "The fill price is the latest real market_ticks row for the symbol, exactly -- no invented slippage model, and never a fabricated or stale-as-fresh price (Decision D14). Nothing is persisted by this route: a Fill only becomes durable once passed to POST /v1/journal/entries (Decision D16)."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrderRequest'
+      responses:
+        '200':
+          description: The computed fill.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Fill'
+        '400':
+          description: "Invalid order (empty symbol, side not buy/sell, or quantity not a positive finite number)."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: "No market data available for this symbol -- the order is rejected, never filled at a fabricated price."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/journal/entries:
+    post:
+      tags: [Journal]
+      operationId: journalCreateEntry
+      summary: Create a journal entry from a real Fill, optionally linked to the TradeIdea/CioVerdict it was based on
+      description: "The first point of persistence for a paper trade (Decision D16). tradeIdea/cioVerdict are optional -- a trade placed with no CIO recommendation behind it is an honest, reportable gap, never a fabricated value."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateJournalEntryInput'
+      responses:
+        '201':
+          description: Journal entry created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JournalEntry'
+        '400':
+          description: Validation failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    get:
+      tags: [Journal]
+      operationId: journalListEntries
+      summary: List the authenticated caller's journal entries
+      responses:
+        '200':
+          description: The caller's journal entries.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  entries:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/JournalEntry'
+                required:
+                  - entries
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/journal/entries/{id}:
+    get:
+      tags: [Journal]
+      operationId: journalGetEntry
+      summary: Fetch one journal entry by id
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The journal entry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JournalEntry'
+        '400':
+          description: Malformed id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: No journal entry with this id exists.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/journal/entries/{id}/outcome:
+    post:
+      tags: [Journal]
+      operationId: journalRecordOutcome
+      summary: Record the exit price/time for an open journal entry and compute its realized P&L
+      description: "Outcome columns are written exactly once (journal-schema.ts) -- guarded on status = 'open' at the database layer so two concurrent calls for the same entry can't both succeed."
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecordOutcomeInput'
+      responses:
+        '200':
+          description: The closed journal entry, with exitPrice/exitAtIso/realizedPnl populated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JournalEntry'
+        '400':
+          description: "Validation failed, or exitPrice/exitAtIso is invalid (exitPrice must be positive; exitAtIso must be a valid ISO timestamp)."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationFailure'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: No journal entry with this id exists.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: This journal entry is already closed -- an outcome may only be recorded once.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # PATHS_INSERTION_POINT
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |-
+        Every proxied service verifies this itself against its own JWT
+        secret; the gateway's own requireAuth (used only by the 10
+        in-process routes) uses the identical verifyAccessToken /
+        InvalidTokenError contract from @tradosphere/auth as every other
+        service.
+
+  schemas:
+    ErrorResponse:
+      type: object
+      description: |-
+        The generic shape every service's setErrorHandler falls back to for
+        unexpected errors, and the shape most caught domain errors use
+        (sometimes with extra fields alongside error, e.g. 409 responses
+        that also carry missingPriceSymbols). Not a Fastify-default
+        {statusCode,error,message} envelope -- just {error, ...}.
+      properties:
+        error:
+          type: string
+      required: [error]
+
+    ValidationFailure:
+      type: object
+      description: The zod-failure shape validateBody() returns on every 400, identical across every service (reused verbatim from services/education's original).
+      properties:
+        error:
+          type: string
+          example: Validation failed
+        details:
+          type: array
+          items:
+            type: object
+            properties:
+              path:
+                type: string
+              message:
+                type: string
+            required: [path, message]
+      required: [error, details]
+
+    MarketTick:
+      type: object
+      properties:
+        symbol:
+          type: string
+        price:
+          type: number
+        volume:
+          type: number
+        timestampIso:
+          type: string
+          format: date-time
+      required: [symbol, price, volume, timestampIso]
+
+    ExpertName:
+      type: string
+      enum: [technical, options, sector, quant, strategy, risk, fundamental, indices, education]
+
+    Verdict:
+      type: string
+      enum: [bullish, moderately_bullish, neutral, moderately_bearish, bearish]
+
+    ExpertOpinion:
+      type: object
+      properties:
+        expert:
+          $ref: '#/components/schemas/ExpertName'
+        verdict:
+          $ref: '#/components/schemas/Verdict'
+        confidence:
+          type: number
+          description: 0-100
+          minimum: 0
+          maximum: 100
+        reasoning:
+          type: array
+          items:
+            type: string
+        generatedAtIso:
+          type: string
+          format: date-time
+      required: [expert, verdict, confidence, reasoning, generatedAtIso]
+
+    TradeIdea:
+      type: object
+      properties:
+        symbol:
+          type: string
+        direction:
+          type: string
+          enum: [long, short]
+        entry:
+          type: number
+        stopLoss:
+          type: number
+        target:
+          type: number
+        riskRewardRatio:
+          type: number
+        educationNote:
+          type: string
+      required: [symbol, direction, entry, stopLoss, target, riskRewardRatio]
+
+    CioVerdict:
+      type: object
+      properties:
+        verdict:
+          $ref: '#/components/schemas/Verdict'
+        confidence:
+          type: number
+        opinions:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExpertOpinion'
+        tradeIdeas:
+          type: array
+          items:
+            $ref: '#/components/schemas/TradeIdea'
+        generatedAtIso:
+          type: string
+          format: date-time
+      required: [verdict, confidence, opinions, tradeIdeas, generatedAtIso]
+
+    ResearchGapReason:
+      type: string
+      enum: [insufficient_history, missing_option_chain, missing_fundamentals, missing_sector_data]
+
+    ResearchGap:
+      type: object
+      description: Returned instead of a fabricated or partially-filled result whenever a research module's required input is missing (Sprint 4 task 4.6).
+      properties:
+        status:
+          type: string
+          enum: [gap]
+        reason:
+          $ref: '#/components/schemas/ResearchGapReason'
+        detail:
+          type: string
+      required: [status, reason, detail]
+
+    PriceBar:
+      type: object
+      properties:
+        timestampIso:
+          type: string
+          format: date-time
+        open:
+          type: number
+        high:
+          type: number
+        low:
+          type: number
+        close:
+          type: number
+        volume:
+          type: number
+      required: [timestampIso, open, high, low, close, volume]
+
+    TechnicalIndicatorSet:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        symbol:
+          type: string
+        rsi14:
+          type: number
+        ema20:
+          type: number
+        ema50:
+          type: number
+        macd:
+          type: object
+          properties:
+            macdLine:
+              type: number
+            signalLine:
+              type: number
+            histogram:
+              type: number
+          required: [macdLine, signalLine, histogram]
+        volume:
+          type: object
+          properties:
+            averageVolume:
+              type: number
+            latestVolume:
+              type: number
+            volumeSpike:
+              type: boolean
+          required: [averageVolume, latestVolume, volumeSpike]
+        breakout:
+          type: object
+          properties:
+            direction:
+              type: string
+              enum: [up, down, none]
+            level:
+              type: number
+          required: [direction, level]
+        generatedAtIso:
+          type: string
+          format: date-time
+      required: [status, symbol, rsi14, ema20, ema50, macd, volume, breakout, generatedAtIso]
+
+    TechnicalAnalysisResult:
+      oneOf:
+        - $ref: '#/components/schemas/TechnicalIndicatorSet'
+        - $ref: '#/components/schemas/ResearchGap'
+
+    OptionStrikeData:
+      type: object
+      properties:
+        strike:
+          type: number
+        callOpenInterest:
+          type: number
+        putOpenInterest:
+          type: number
+        callOpenInterestPrevious:
+          type: number
+        putOpenInterestPrevious:
+          type: number
+      required: [strike, callOpenInterest, putOpenInterest, callOpenInterestPrevious, putOpenInterestPrevious]
+
+    OptionChainSnapshot:
+      type: object
+      properties:
+        symbol:
+          type: string
+        underlyingPrice:
+          type: number
+        strikes:
+          type: array
+          items:
+            $ref: '#/components/schemas/OptionStrikeData'
+      required: [symbol, underlyingPrice, strikes]
+
+    OptionChainAnalysis:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        symbol:
+          type: string
+        putCallRatio:
+          type: number
+        oiShift:
+          type: object
+          properties:
+            calls:
+              type: number
+            puts:
+              type: number
+          required: [calls, puts]
+        interpretation:
+          type: string
+          enum: [call_writing, put_writing, call_unwinding, put_unwinding, neutral]
+        generatedAtIso:
+          type: string
+          format: date-time
+      required: [status, symbol, putCallRatio, oiShift, interpretation, generatedAtIso]
+
+    OptionAnalysisResult:
+      oneOf:
+        - $ref: '#/components/schemas/OptionChainAnalysis'
+        - $ref: '#/components/schemas/ResearchGap'
+
+    FundamentalAnalysis:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        symbol:
+          type: string
+        peRatio:
+          type: number
+        debtToEquity:
+          type: number
+        revenueGrowthYoyPct:
+          type: number
+        netProfitMarginPct:
+          type: number
+        verdict:
+          type: string
+          enum: [strong, stable, weak]
+        generatedAtIso:
+          type: string
+          format: date-time
+      required: [status, symbol, peRatio, debtToEquity, revenueGrowthYoyPct, netProfitMarginPct, verdict, generatedAtIso]
+
+    FundamentalAnalysisResult:
+      oneOf:
+        - $ref: '#/components/schemas/FundamentalAnalysis'
+        - $ref: '#/components/schemas/ResearchGap'
+
+    SectorAnalysis:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        sector:
+          type: string
+        relativeStrengthPct:
+          type: number
+        rotation:
+          type: string
+          enum: [inflow, outflow, neutral]
+        generatedAtIso:
+          type: string
+          format: date-time
+      required: [status, sector, relativeStrengthPct, rotation, generatedAtIso]
+
+    SectorAnalysisResult:
+      oneOf:
+        - $ref: '#/components/schemas/SectorAnalysis'
+        - $ref: '#/components/schemas/ResearchGap'
+
+    QuantSignalSet:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        symbol:
+          type: string
+        zScore:
+          type: number
+        volatilityAnnualizedPct:
+          type: number
+        meanReversionSignal:
+          type: string
+          enum: [buy, sell, hold]
+        generatedAtIso:
+          type: string
+          format: date-time
+      required: [status, symbol, zScore, volatilityAnnualizedPct, meanReversionSignal, generatedAtIso]
+
+    QuantAnalysisResult:
+      oneOf:
+        - $ref: '#/components/schemas/QuantSignalSet'
+        - $ref: '#/components/schemas/ResearchGap'
+
+    PortfolioRiskContext:
+      type: object
+      description: services/cio/src/risk-gate.ts. Supplied directly in the /v1/cio/verdict request body (Decision D19 sub-part 8) -- no auto-wiring to live services/portfolio state yet.
+      properties:
+        currentDrawdownPct:
+          type: number
+        maxDrawdownPct:
+          type: number
+        currentExposurePct:
+          type: number
+        maxExposurePct:
+          type: number
+      required: [currentDrawdownPct, maxDrawdownPct, currentExposurePct, maxExposurePct]
+
+    OrderSide:
+      type: string
+      enum: [buy, sell]
+
+    OrderRequest:
+      type: object
+      properties:
+        symbol:
+          type: string
+        side:
+          $ref: '#/components/schemas/OrderSide'
+        quantity:
+          type: number
+      required: [symbol, side, quantity]
+
+    Fill:
+      type: object
+      description: |-
+        priceAsOfIso (the real market tick's own timestamp) is always
+        distinct from filledAtIso (when the order executed) -- Decision
+        D14 -- so a consumer can always tell how fresh the price behind a
+        fill was.
+      properties:
+        symbol:
+          type: string
+        side:
+          $ref: '#/components/schemas/OrderSide'
+        quantity:
+          type: number
+        price:
+          type: number
+        filledAtIso:
+          type: string
+          format: date-time
+        priceAsOfIso:
+          type: string
+          format: date-time
+      required: [symbol, side, quantity, price, filledAtIso, priceAsOfIso]
+
+    JournalEntryStatus:
+      type: string
+      enum: [open, closed]
+
+    JournalEntry:
+      type: object
+      description: |-
+        The first point of persistence for a paper trade (Decision D16).
+        Every recommended*/cio* field is optional -- a trade placed with no
+        CIO recommendation behind it is an honest, reportable gap, never a
+        fabricated value.
+      properties:
+        id:
+          type: string
+        userId:
+          type: string
+        symbol:
+          type: string
+        side:
+          $ref: '#/components/schemas/OrderSide'
+        quantity:
+          type: number
+        fillPrice:
+          type: number
+        filledAtIso:
+          type: string
+          format: date-time
+        priceAsOfIso:
+          type: string
+          format: date-time
+        recommendedDirection:
+          type: string
+          enum: [long, short]
+        recommendedEntry:
+          type: number
+        recommendedStopLoss:
+          type: number
+        recommendedTarget:
+          type: number
+        recommendedRiskRewardRatio:
+          type: number
+        cioVerdictLabel:
+          $ref: '#/components/schemas/Verdict'
+        cioConfidence:
+          type: number
+        educationNote:
+          type: string
+        recommendationGeneratedAtIso:
+          type: string
+          format: date-time
+        status:
+          $ref: '#/components/schemas/JournalEntryStatus'
+        exitPrice:
+          type: number
+        exitAtIso:
+          type: string
+          format: date-time
+        realizedPnl:
+          type: number
+        createdAtIso:
+          type: string
+          format: date-time
+      required: [id, symbol, side, quantity, fillPrice, filledAtIso, priceAsOfIso, status, createdAtIso]
+
+    CreateJournalEntryInput:
+      type: object
+      description: fill is required; tradeIdea/cioVerdict are optional and compose the existing TradeIdea/CioVerdict types directly rather than re-flattening them into parallel field names.
+      properties:
+        userId:
+          type: string
+        fill:
+          $ref: '#/components/schemas/Fill'
+        tradeIdea:
+          $ref: '#/components/schemas/TradeIdea'
+        cioVerdict:
+          $ref: '#/components/schemas/CioVerdict'
+      required: [fill]
+
+    RecordOutcomeInput:
+      type: object
+      properties:
+        exitPrice:
+          type: number
+        exitAtIso:
+          type: string
+          format: date-time
+      required: [exitPrice, exitAtIso]
+
+    Role:
+      type: string
+      enum: [admin, trader, viewer]
+
+    SignupRequest:
+      type: object
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 8
+          maxLength: 128
+      required: [email, password]
+
+    LoginRequest:
+      type: object
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+      required: [email, password]
+
+    RefreshRequest:
+      type: object
+      properties:
+        refreshToken:
+          type: string
+      required: [refreshToken]
+
+    LogoutRequest:
+      type: object
+      properties:
+        refreshToken:
+          type: string
+      required: [refreshToken]
+
+    AuthResult:
+      type: object
+      properties:
+        accessToken:
+          type: string
+        refreshToken:
+          type: string
+        user:
+          type: object
+          properties:
+            id:
+              type: string
+            email:
+              type: string
+            role:
+              $ref: '#/components/schemas/Role'
+          required: [id, email, role]
+      required: [accessToken, refreshToken, user]
+
+    MeResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        email:
+          type: string
+        role:
+          $ref: '#/components/schemas/Role'
+      required: [id, email, role]
+
+    AdminPingResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          enum: [true]
+      required: [ok]
+
+    EducationContentStatus:
+      type: string
+      enum: [draft, published, archived]
+
+    EducationSourceType:
+      type: string
+      enum: [human, ai_generated]
+
+    Category:
+      type: object
+      properties:
+        id:
+          type: string
+        slug:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+      required: [id, slug, name, createdAt]
+
+    Tag:
+      type: object
+      properties:
+        id:
+          type: string
+        slug:
+          type: string
+        name:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+      required: [id, slug, name, createdAt]
+
+    GlossaryTerm:
+      type: object
+      properties:
+        id:
+          type: string
+        slug:
+          type: string
+        term:
+          type: string
+        definition:
+          type: string
+        categoryId:
+          type: string
+        status:
+          $ref: '#/components/schemas/EducationContentStatus'
+        sourceType:
+          $ref: '#/components/schemas/EducationSourceType'
+        version:
+          type: integer
+        createdBy:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+      required: [id, slug, term, definition, status, sourceType, version, createdAt, updatedAt]
+
+    CreateCategoryInput:
+      type: object
+      properties:
+        slug:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+      required: [slug, name]
+
+    CreateTagInput:
+      type: object
+      properties:
+        slug:
+          type: string
+        name:
+          type: string
+      required: [slug, name]
+
+    CreateGlossaryTermInput:
+      type: object
+      properties:
+        slug:
+          type: string
+        term:
+          type: string
+        definition:
+          type: string
+        categoryId:
+          type: string
+        status:
+          $ref: '#/components/schemas/EducationContentStatus'
+        sourceType:
+          $ref: '#/components/schemas/EducationSourceType'
+      required: [slug, term, definition]
+
+    UpdateGlossaryTermInput:
+      type: object
+      description: Same fields as CreateGlossaryTermInput minus slug, all optional -- slug is immutable after creation.
+      properties:
+        term:
+          type: string
+        definition:
+          type: string
+        categoryId:
+          type: string
+        status:
+          $ref: '#/components/schemas/EducationContentStatus'
+        sourceType:
+          $ref: '#/components/schemas/EducationSourceType'
+
+    EducationDifficulty:
+      type: string
+      enum: [beginner, intermediate, advanced]
+
+    Course:
+      type: object
+      properties:
+        id:
+          type: string
+        slug:
+          type: string
+        title:
+          type: string
+        description:
+          type: string
+        categoryId:
+          type: string
+        difficulty:
+          $ref: '#/components/schemas/EducationDifficulty'
+        status:
+          $ref: '#/components/schemas/EducationContentStatus'
+        sourceType:
+          $ref: '#/components/schemas/EducationSourceType'
+        version:
+          type: integer
+        createdBy:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+      required: [id, slug, title, description, difficulty, status, sourceType, version, createdAt, updatedAt]
+
+    Lesson:
+      type: object
+      properties:
+        id:
+          type: string
+        courseId:
+          type: string
+        slug:
+          type: string
+        title:
+          type: string
+        content:
+          type: string
+        orderIndex:
+          type: integer
+        status:
+          $ref: '#/components/schemas/EducationContentStatus'
+        sourceType:
+          $ref: '#/components/schemas/EducationSourceType'
+        version:
+          type: integer
+        createdBy:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+      required: [id, courseId, slug, title, content, orderIndex, status, sourceType, version, createdAt, updatedAt]
+
+    CreateCourseInput:
+      type: object
+      properties:
+        slug:
+          type: string
+        title:
+          type: string
+        description:
+          type: string
+        categoryId:
+          type: string
+        difficulty:
+          $ref: '#/components/schemas/EducationDifficulty'
+        status:
+          $ref: '#/components/schemas/EducationContentStatus'
+        sourceType:
+          $ref: '#/components/schemas/EducationSourceType'
+      required: [slug, title, description]
+
+    UpdateCourseInput:
+      type: object
+      description: Same fields as CreateCourseInput minus slug, all optional.
+      properties:
+        title:
+          type: string
+        description:
+          type: string
+        categoryId:
+          type: string
+        difficulty:
+          $ref: '#/components/schemas/EducationDifficulty'
+        status:
+          $ref: '#/components/schemas/EducationContentStatus'
+        sourceType:
+          $ref: '#/components/schemas/EducationSourceType'
+
+    CreateLessonInput:
+      type: object
+      description: No courseId field -- the parent course is always resolved from the courseSlug path segment.
+      properties:
+        slug:
+          type: string
+        title:
+          type: string
+        content:
+          type: string
+        orderIndex:
+          type: integer
+          minimum: 0
+        status:
+          $ref: '#/components/schemas/EducationContentStatus'
+        sourceType:
+          $ref: '#/components/schemas/EducationSourceType'
+      required: [slug, title, content]
+
+    UpdateLessonInput:
+      type: object
+      description: Same fields as CreateLessonInput minus slug, all optional.
+      properties:
+        title:
+          type: string
+        content:
+          type: string
+        orderIndex:
+          type: integer
+          minimum: 0
+        status:
+          $ref: '#/components/schemas/EducationContentStatus'
+        sourceType:
+          $ref: '#/components/schemas/EducationSourceType'
+
+    Strategy:
+      type: object
+      properties:
+        id:
+          type: string
+        slug:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        categoryId:
+          type: string
+        difficulty:
+          $ref: '#/components/schemas/EducationDifficulty'
+        status:
+          $ref: '#/components/schemas/EducationContentStatus'
+        sourceType:
+          $ref: '#/components/schemas/EducationSourceType'
+        version:
+          type: integer
+        createdBy:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+      required: [id, slug, name, description, difficulty, status, sourceType, version, createdAt, updatedAt]
+
+    Quiz:
+      type: object
+      properties:
+        id:
+          type: string
+        slug:
+          type: string
+        title:
+          type: string
+        courseId:
+          type: string
+        lessonId:
+          type: string
+        status:
+          $ref: '#/components/schemas/EducationContentStatus'
+        sourceType:
+          $ref: '#/components/schemas/EducationSourceType'
+        version:
+          type: integer
+        createdBy:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+      required: [id, slug, title, status, sourceType, version, createdAt, updatedAt]
+
+    CreateStrategyInput:
+      type: object
+      properties:
+        slug:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        categoryId:
+          type: string
+        difficulty:
+          $ref: '#/components/schemas/EducationDifficulty'
+        status:
+          $ref: '#/components/schemas/EducationContentStatus'
+        sourceType:
+          $ref: '#/components/schemas/EducationSourceType'
+      required: [slug, name, description]
+
+    UpdateStrategyInput:
+      type: object
+      description: Same fields as CreateStrategyInput minus slug, all optional.
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        categoryId:
+          type: string
+        difficulty:
+          $ref: '#/components/schemas/EducationDifficulty'
+        status:
+          $ref: '#/components/schemas/EducationContentStatus'
+        sourceType:
+          $ref: '#/components/schemas/EducationSourceType'
+
+    CreateQuizInput:
+      type: object
+      properties:
+        slug:
+          type: string
+        title:
+          type: string
+        courseId:
+          type: string
+        lessonId:
+          type: string
+        status:
+          $ref: '#/components/schemas/EducationContentStatus'
+        sourceType:
+          $ref: '#/components/schemas/EducationSourceType'
+      required: [slug, title]
+
+    UpdateQuizInput:
+      type: object
+      description: Same fields as CreateQuizInput minus slug, all optional.
+      properties:
+        title:
+          type: string
+        courseId:
+          type: string
+        lessonId:
+          type: string
+        status:
+          $ref: '#/components/schemas/EducationContentStatus'
+        sourceType:
+          $ref: '#/components/schemas/EducationSourceType'
+
+    QuizQuestion:
+      type: object
+      description: Full row including the answer key -- only ever served to admins (POST/PATCH responses and GET /quizzes/{slug}/answer-key). Learner-facing reads use PublicQuizQuestion instead.
+      properties:
+        id:
+          type: string
+        quizId:
+          type: string
+        question:
+          type: string
+        options:
+          type: array
+          items:
+            type: string
+        correctOptionIndex:
+          type: integer
+        explanation:
+          type: string
+        orderIndex:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+      required: [id, quizId, question, options, correctOptionIndex, orderIndex, createdAt]
+
+    PublicQuizQuestion:
+      type: object
+      description: toPublicQuestion()'s redacted projection -- no correctOptionIndex, no explanation.
+      properties:
+        id:
+          type: string
+        quizId:
+          type: string
+        question:
+          type: string
+        options:
+          type: array
+          items:
+            type: string
+        orderIndex:
+          type: integer
+      required: [id, quizId, question, options, orderIndex]
+
+    CreateQuizQuestionInput:
+      type: object
+      description: Refined server-side so correctOptionIndex must be a valid index into options (2-10 options).
+      properties:
+        question:
+          type: string
+        options:
+          type: array
+          items:
+            type: string
+          minItems: 2
+          maxItems: 10
+        correctOptionIndex:
+          type: integer
+          minimum: 0
+        explanation:
+          type: string
+        orderIndex:
+          type: integer
+          minimum: 0
+      required: [question, options, correctOptionIndex]
+
+    UpdateQuizQuestionInput:
+      type: object
+      description: All fields optional. The correctOptionIndex-within-options cross-check only fires when both fields are present in the same patch.
+      properties:
+        question:
+          type: string
+        options:
+          type: array
+          items:
+            type: string
+          minItems: 2
+          maxItems: 10
+        correctOptionIndex:
+          type: integer
+          minimum: 0
+        explanation:
+          type: string
+        orderIndex:
+          type: integer
+          minimum: 0
+
+    QuizAttempt:
+      type: object
+      properties:
+        id:
+          type: string
+        userId:
+          type: string
+        quizId:
+          type: string
+        score:
+          type: integer
+        totalQuestions:
+          type: integer
+        answers:
+          type: array
+          items:
+            type: object
+            properties:
+              questionId:
+                type: string
+              selectedOptionIndex:
+                type: integer
+              correct:
+                type: boolean
+            required: [questionId, selectedOptionIndex, correct]
+        completedAt:
+          type: string
+          format: date-time
+      required: [id, userId, quizId, score, totalQuestions, answers, completedAt]
+
+    SubmitQuizAttemptInput:
+      type: object
+      properties:
+        answers:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            properties:
+              questionId:
+                type: string
+                format: uuid
+              selectedOptionIndex:
+                type: integer
+                minimum: 0
+            required: [questionId, selectedOptionIndex]
+      required: [answers]
+
+    EducationContentType:
+      type: string
+      description: Discriminator for the three polymorphic education tables (content tags, content revisions, progress) -- one enum, reused three times.
+      enum: [glossary_term, course, lesson, strategy, quiz]
+
+    EducationProgressStatus:
+      type: string
+      enum: [not_started, in_progress, completed]
+
+    ContentTag:
+      type: object
+      properties:
+        id:
+          type: string
+        contentType:
+          $ref: '#/components/schemas/EducationContentType'
+        contentId:
+          type: string
+        tagId:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+      required: [id, contentType, contentId, tagId, createdAt]
+
+    ContentRevision:
+      type: object
+      description: snapshot captures the full pre-update state of the content row, written immediately before every update -- so version N is always reconstructable even after the live row has moved to N+1.
+      properties:
+        id:
+          type: string
+        contentType:
+          $ref: '#/components/schemas/EducationContentType'
+        contentId:
+          type: string
+        version:
+          type: integer
+        snapshot:
+          type: object
+          additionalProperties: true
+        editedBy:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+      required: [id, contentType, contentId, version, snapshot, createdAt]
+
+    Progress:
+      type: object
+      properties:
+        id:
+          type: string
+        userId:
+          type: string
+        contentType:
+          $ref: '#/components/schemas/EducationContentType'
+        contentId:
+          type: string
+        status:
+          $ref: '#/components/schemas/EducationProgressStatus'
+        progressPct:
+          type: integer
+          minimum: 0
+          maximum: 100
+        lastAccessedAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: string
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+      required: [id, userId, contentType, contentId, status, progressPct, lastAccessedAt, createdAt]
+
+    AttachTagInput:
+      type: object
+      properties:
+        tagId:
+          type: string
+          format: uuid
+      required: [tagId]
+
+    UpsertProgressInput:
+      type: object
+      properties:
+        status:
+          $ref: '#/components/schemas/EducationProgressStatus'
+        progressPct:
+          type: integer
+          minimum: 0
+          maximum: 100
+      required: [status]
+
+    TutorExplainInput:
+      type: object
+      properties:
+        opinions:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExpertOpinion'
+      required: [opinions]
+
+    AnnotateTradeIdeaInput:
+      type: object
+      properties:
+        tradeIdea:
+          $ref: '#/components/schemas/TradeIdea'
+        opinions:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExpertOpinion'
+      required: [tradeIdea, opinions]
+
+    PositionDirection:
+      type: string
+      enum: [long, short]
+
+    Position:
+      type: object
+      description: Net position for one symbol, computed from open trade records only as a quantity-weighted average entry price (Decision D17).
+      properties:
+        symbol:
+          type: string
+        direction:
+          $ref: '#/components/schemas/PositionDirection'
+        quantity:
+          type: number
+        averageEntryPrice:
+          type: number
+      required: [symbol, direction, quantity, averageEntryPrice]
+
+    PortfolioSnapshot:
+      type: object
+      description: One persisted row from POST /v1/portfolio/snapshot. totalEquity = startingCash + realizedPnl + unrealizedPnl, which is algebraically identical to cashBalance + positionsValue (Decision D17).
+      properties:
+        id:
+          type: string
+        userId:
+          type: string
+        cashBalance:
+          type: number
+        positionsValue:
+          type: number
+        realizedPnl:
+          type: number
+        unrealizedPnl:
+          type: number
+        totalEquity:
+          type: number
+        label:
+          type: string
+        asOf:
+          type: string
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+      required: [id, cashBalance, positionsValue, realizedPnl, unrealizedPnl, totalEquity, asOf, createdAt]
+
+    CreateSnapshotInput:
+      type: object
+      description: Every field is optional. Deliberately excludes every computed figure (cashBalance, positionsValue, realizedPnl, unrealizedPnl, totalEquity) -- a snapshot can never be fabricated or tampered with (Forge charter rule 2).
+      properties:
+        label:
+          type: string
+          minLength: 1
+          maxLength: 200
+        asOf:
+          type: string
+          format: date-time
+          description: Defaults to the current time when omitted.
+
+    PerformanceMetrics:
+      type: object
+      description: Portfolio-level performance totals only (Decision D17) -- see GET /v1/portfolio/performance's description for what's deliberately out of scope.
+      properties:
+        startingCash:
+          type: number
+        totalEquity:
+          type: number
+        totalReturn:
+          type: number
+        totalReturnPct:
+          type: number
+        realizedPnl:
+          type: number
+        unrealizedPnl:
+          type: number
+      required: [startingCash, totalEquity, totalReturn, totalReturnPct, realizedPnl, unrealizedPnl]
+
+    AllocationEntry:
+      type: object
+      properties:
+        symbol:
+          type: string
+        direction:
+          $ref: '#/components/schemas/PositionDirection'
+        marketValue:
+          type: number
+        allocationPct:
+          type: number
+      required: [symbol, direction, marketValue, allocationPct]
+
+    RiskAdjustedReturns:
+      type: object
+      description: Sharpe and Sortino ratios derived from the portfolio's own equity-curve period returns (Decision D18) -- both null whenever insufficientData is true, and individually null whenever their own deviation is exactly zero.
+      properties:
+        sharpeRatio:
+          type: number
+        sortinoRatio:
+          type: number
+        insufficientData:
+          type: boolean
+      required: [insufficientData]
+
+    SessionWindowKey:
+      type: string
+      description: One of four fixed, equal-width UTC-hour windows (Decision D18) -- not a specific exchange's local trading-session schedule.
+      enum:
+        - h00_06
+        - h06_12
+        - h12_18
+        - h18_24
+
+    DayOfWeek:
+      type: string
+      enum:
+        - sunday
+        - monday
+        - tuesday
+        - wednesday
+        - thursday
+        - friday
+        - saturday
+
+    MonthBucket:
+      type: object
+      description: UTC calendar month, keyed off the trade's own filledAtIso timestamp.
+      properties:
+        key:
+          type: string
+          description: "Sortable, human-readable month key, e.g. '2026-01'."
+        year:
+          type: integer
+        month:
+          type: integer
+          description: 1-12.
+      required: [key, year, month]
+
+    MonthlyReport:
+      type: object
+      description: One report per UTC calendar month a trade was filled in -- a trade is attributed entirely to the month it opened, never split across months.
+      properties:
+        month:
+          $ref: '#/components/schemas/MonthBucket'
+        totalTrades:
+          type: integer
+        winningTrades:
+          type: integer
+        losingTrades:
+          type: integer
+        breakevenTrades:
+          type: integer
+        openTrades:
+          type: integer
+        totalRealizedPnl:
+          type: number
+        winRate:
+          type: number
+        averageReturn:
+          type: number
+        averageReturnPct:
+          type: number
+        expectancy:
+          type: number
+        plannedRiskRewardRatio:
+          type: number
+        realizedRiskRewardRatio:
+          type: number
+      required: [month, totalTrades, winningTrades, losingTrades, breakevenTrades, openTrades, totalRealizedPnl]
+
+    StrategyKey:
+      type: object
+      description: "Groups trades by cioVerdictLabel + recommendedDirection, the only real categorical proxy available -- journal_entries has no dedicated strategy column. Entries with neither field populated fall into the explicit 'no_recommendation' bucket."
+      properties:
+        key:
+          type: string
+          description: "e.g. 'bullish__long', or 'no_recommendation'."
+        cioVerdictLabel:
+          type: string
+        recommendedDirection:
+          type: string
+      required: [key]
+
+    StrategyStats:
+      type: object
+      properties:
+        strategy:
+          $ref: '#/components/schemas/StrategyKey'
+        totalTrades:
+          type: integer
+        winningTrades:
+          type: integer
+        losingTrades:
+          type: integer
+        breakevenTrades:
+          type: integer
+        openTrades:
+          type: integer
+        totalRealizedPnl:
+          type: number
+        winRate:
+          type: number
+        averageReturn:
+          type: number
+        expectancy:
+          type: number
+      required: [strategy, totalTrades, winningTrades, losingTrades, breakevenTrades, openTrades, totalRealizedPnl]
+
+    DistributionBucket:
+      type: object
+      properties:
+        rangeStart:
+          type: number
+        rangeEnd:
+          type: number
+        count:
+          type: integer
+      required: [rangeStart, rangeEnd, count]
+
+    TradeDistribution:
+      type: object
+      description: Bucket boundaries are computed from the caller's own real min/max realized P&L, split into bucketCount (default 10, overridable via ?buckets=N) equal-width buckets -- never a fixed hardcoded currency threshold.
+      properties:
+        buckets:
+          type: array
+          items:
+            $ref: '#/components/schemas/DistributionBucket'
+        minPnl:
+          type: number
+        maxPnl:
+          type: number
+      required: [buckets]
+
+    HeatmapCell:
+      type: object
+      description: "Day-of-week (UTC) x session-window cell. Always 7x4=28 cells, even when a cell has zero trades -- a quiet day/session is a real fact, not an omission."
+      properties:
+        dayOfWeek:
+          $ref: '#/components/schemas/DayOfWeek'
+        session:
+          $ref: '#/components/schemas/SessionWindowKey'
+        sessionLabel:
+          type: string
+        totalTrades:
+          type: integer
+        totalRealizedPnl:
+          type: number
+        winRate:
+          type: number
+      required: [dayOfWeek, session, sessionLabel, totalTrades, totalRealizedPnl]
+
+    SessionStats:
+      type: object
+      description: Always exactly 4 rows, one per fixed UTC-hour session window, even when a window has zero trades.
+      properties:
+        session:
+          $ref: '#/components/schemas/SessionWindowKey'
+        label:
+          type: string
+        totalTrades:
+          type: integer
+        winningTrades:
+          type: integer
+        losingTrades:
+          type: integer
+        breakevenTrades:
+          type: integer
+        openTrades:
+          type: integer
+        totalRealizedPnl:
+          type: number
+        winRate:
+          type: number
+        averageReturn:
+          type: number
+      required: [session, label, totalTrades, winningTrades, losingTrades, breakevenTrades, openTrades, totalRealizedPnl]
+
+    InstrumentStats:
+      type: object
+      description: Grouped by the trade's own symbol -- the one unambiguous instrument field journal_entries has.
+      properties:
+        symbol:
+          type: string
+        totalTrades:
+          type: integer
+        winningTrades:
+          type: integer
+        losingTrades:
+          type: integer
+        breakevenTrades:
+          type: integer
+        openTrades:
+          type: integer
+        totalRealizedPnl:
+          type: number
+        winRate:
+          type: number
+        averageReturn:
+          type: number
+      required: [symbol, totalTrades, winningTrades, losingTrades, breakevenTrades, openTrades, totalRealizedPnl]
+
+    FullStatSet:
+      type: object
+      description: The complete stat set GET /v1/analytics/performance returns, and the same set POST /v1/analytics/reports persists -- one function computes both, so they can never disagree.
+      properties:
+        totalTrades:
+          type: integer
+        winningTrades:
+          type: integer
+        losingTrades:
+          type: integer
+        breakevenTrades:
+          type: integer
+        openTrades:
+          type: integer
+        totalRealizedPnl:
+          type: number
+        winRate:
+          type: number
+        averageReturn:
+          type: number
+        averageReturnPct:
+          type: number
+        expectancy:
+          type: number
+        plannedRiskRewardRatio:
+          type: number
+        realizedRiskRewardRatio:
+          type: number
+        maxDrawdownPct:
+          type: number
+        sharpeRatio:
+          type: number
+        sortinoRatio:
+          type: number
+      required: [totalTrades, winningTrades, losingTrades, breakevenTrades, openTrades, totalRealizedPnl]
+
+    AnalyticsReport:
+      type: object
+      description: The one persisted resource this service owns -- a point-in-time snapshot of the full stat set as of a given moment or over a given period.
+      properties:
+        id:
+          type: string
+        userId:
+          type: string
+        label:
+          type: string
+        fromDate:
+          type: string
+          format: date-time
+        toDate:
+          type: string
+          format: date-time
+        totalTrades:
+          type: integer
+        winningTrades:
+          type: integer
+        losingTrades:
+          type: integer
+        breakevenTrades:
+          type: integer
+        openTrades:
+          type: integer
+        totalRealizedPnl:
+          type: number
+        winRate:
+          type: number
+        averageReturn:
+          type: number
+        averageReturnPct:
+          type: number
+        expectancy:
+          type: number
+        plannedRiskRewardRatio:
+          type: number
+        realizedRiskRewardRatio:
+          type: number
+        maxDrawdownPct:
+          type: number
+        sharpeRatio:
+          type: number
+        sortinoRatio:
+          type: number
+        asOf:
+          type: string
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+      required: [id, totalTrades, winningTrades, losingTrades, breakevenTrades, openTrades, totalRealizedPnl, asOf, createdAt]
+
+    CreateAnalyticsReportInput:
+      type: object
+      description: Every field is optional and none of them are stat columns -- every number in the persisted report is server-computed from computeFullStatSet(), never caller-supplied.
+      properties:
+        label:
+          type: string
+          minLength: 1
+          maxLength: 200
+        from:
+          type: string
+          format: date-time
+        to:
+          type: string
+          format: date-time
+        asOf:
+          type: string
+          format: date-time
+
+    AnalyzeTechnicalInput:
+      type: object
+      description: services/research/src/technical.ts analyzeTechnical(symbol, bars).
+      properties:
+        symbol:
+          type: string
+        bars:
+          type: array
+          items:
+            $ref: '#/components/schemas/PriceBar'
+      required: [symbol, bars]
+
+    AnalyzeSectorInput:
+      type: object
+      description: services/research/src/sector.ts analyzeSector(sector, sectorBars, benchmarkBars, rotationThresholdPct?). rotationThresholdPct defaults to 2 when omitted.
+      properties:
+        sector:
+          type: string
+        sectorBars:
+          type: array
+          items:
+            $ref: '#/components/schemas/PriceBar'
+        benchmarkBars:
+          type: array
+          items:
+            $ref: '#/components/schemas/PriceBar'
+        rotationThresholdPct:
+          type: number
+      required: [sector, sectorBars, benchmarkBars]
+
+    AnalyzeQuantInput:
+      type: object
+      description: services/research/src/quant.ts analyzeQuant(symbol, bars, period?). period defaults to 20 when omitted.
+      properties:
+        symbol:
+          type: string
+        bars:
+          type: array
+          items:
+            $ref: '#/components/schemas/PriceBar'
+        period:
+          type: number
+      required: [symbol, bars]
+
+    StrategyAgentInput:
+      type: object
+      description: services/ai/src/agents/strategy-agent.ts. Same shape as EducationAgentInput -- both are synthesis agents that take the other experts' opinions.
+      properties:
+        opinions:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExpertOpinion'
+      required: [opinions]
+
+    RiskAgentInput:
+      type: object
+      description: services/ai/src/agents/risk-agent.ts. volatilityAnnualizedPct is optional -- omitted volatility is treated as 0 (low risk) rather than rejected.
+      properties:
+        opinions:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExpertOpinion'
+        volatilityAnnualizedPct:
+          type: number
+      required: [opinions]
+
+    EducationAgentInput:
+      type: object
+      description: services/ai/src/agents/education-agent.ts.
+      properties:
+        opinions:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExpertOpinion'
+      required: [opinions]
+
+    BuildCioVerdictInput:
+      type: object
+      description: services/cio/src/cio.ts buildCioVerdict(input). dataValid must be derived from real upstream state (e.g. false if any research/agent input was a ResearchGap) -- never hardcoded true.
+      properties:
+        symbol:
+          type: string
+        opinions:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExpertOpinion'
+        referencePrice:
+          type: number
+        portfolio:
+          $ref: '#/components/schemas/PortfolioRiskContext'
+        dataValid:
+          type: boolean
+        minConfidence:
+          type: number
+          description: Defaults to 40 (DEFAULT_MIN_CONFIDENCE) when omitted.
+        minRiskRewardRatio:
+          type: number
+          description: Defaults to 1.5 (DEFAULT_MIN_RISK_REWARD_RATIO) when omitted.
+        stopLossPct:
+          type: number
+        targetRiskRewardRatio:
+          type: number
+      required: [symbol, opinions, referencePrice, portfolio, dataValid]
+
+    RiskGateMitigation:
+      type: object
+      description: Present only when the risk gate returns Level 2.
+      properties:
+        positionSizeMultiplier:
+          type: number
+          description: "e.g. 0.5 = half the normal position size."
+        leverageMultiplier:
+          type: number
+        note:
+          type: string
+      required: [positionSizeMultiplier, leverageMultiplier, note]
+
+    RiskGateResult:
+      type: object
+      description: |-
+        Decision D8's three-level tiered veto (services/cio/src/risk-gate.ts).
+        Level 1 = hard veto, approved is false, the CIO must never override
+        it. Level 2 = approved, but only alongside mitigation. Level 3 = full
+        approval, no conditions triggered.
+      properties:
+        level:
+          type: integer
+          enum: [1, 2, 3]
+        approved:
+          type: boolean
+        reasons:
+          type: array
+          items:
+            type: string
+        mitigation:
+          $ref: '#/components/schemas/RiskGateMitigation'
+      required: [level, approved, reasons]
+
+    TraceEntry:
+      type: object
+      description: One entry per raw opinion, in input order -- every agent that spoke, whether or not it was weighted into the directional score.
+      properties:
+        expert:
+          $ref: '#/components/schemas/ExpertName'
+        verdict:
+          $ref: '#/components/schemas/Verdict'
+        confidence:
+          type: number
+        weight:
+          type: number
+        included:
+          type: boolean
+          description: True iff this opinion carried nonzero weight into the consensus score.
+        contribution:
+          type: number
+          description: 0 when excluded.
+        reasoning:
+          type: array
+          items:
+            type: string
+      required: [expert, verdict, confidence, weight, included, contribution, reasoning]
+
+    ExplainabilityTrace:
+      type: object
+      description: Task 6.3. The recorded entries/consensus alone are sufficient to independently recompute the same verdict computeConsensus() produced, without re-calling it or looking at the original opinions array.
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/TraceEntry'
+        consensus:
+          type: object
+          properties:
+            weightedScore:
+              type: number
+            verdict:
+              $ref: '#/components/schemas/Verdict'
+            confidence:
+              type: number
+          required: [weightedScore, verdict, confidence]
+        riskGate:
+          $ref: '#/components/schemas/RiskGateResult'
+        summary:
+          type: array
+          items:
+            type: string
+      required: [entries, consensus, summary]
+
+    CioVerdictWithTrace:
+      allOf:
+        - $ref: '#/components/schemas/CioVerdict'
+        - type: object
+          description: "Decision D10: a superset of CioVerdict, not a modification of it -- every field CioVerdict has is present here unchanged, plus the trace/riskGate detail behind it."
+          properties:
+            trace:
+              $ref: '#/components/schemas/ExplainabilityTrace'
+            riskGate:
+              $ref: '#/components/schemas/RiskGateResult'
+          required: [trace, riskGate]
+
+    # SCHEMAS_INSERTION_POINT

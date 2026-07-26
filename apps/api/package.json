@@ -6,16 +6,40 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "lint": "eslint src --ext .ts",
-    "test": "echo \"no tests yet\"",
-    "dev": "node dist/index.js"
+    "test": "vitest run",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts"
   },
   "dependencies": {
-    "@tradosphere/shared-types": "workspace:*",
+    "@tradosphere/auth": "workspace:*",
+    "@tradosphere/config": "workspace:*",
+    "@tradosphere/database": "workspace:*",
+    "@tradosphere/event-bus": "workspace:*",
     "@tradosphere/logger": "workspace:*",
-    "@tradosphere/config": "workspace:*"
+    "@tradosphere/service-ai": "workspace:*",
+    "@tradosphere/service-cio": "workspace:*",
+    "@tradosphere/service-journal": "workspace:*",
+    "@tradosphere/service-paper-trading": "workspace:*",
+    "@tradosphere/service-research": "workspace:*",
+    "@tradosphere/shared-types": "workspace:*",
+    "@fastify/rate-limit": "^9.1.0",
+    "drizzle-orm": "^0.36.4",
+    "fastify": "^4.28.1",
+    "ioredis": "^5.4.1",
+    "pg": "^8.13.1",
+    "prom-client": "^15.1.3",
+    "ws": "^8.18.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@tradosphere/sdk": "workspace:*",
+    "@types/node": "^22.10.0",
+    "@types/pg": "^8.11.10",
+    "@types/ws": "^8.5.13",
+    "embedded-postgres": "18.4.0-beta.17",
+    "ioredis-mock": "^8.9.0",
+    "tsx": "^4.19.2",
     "typescript": "^5.7.2",
-    "@types/node": "^22.10.0"
+    "vitest": "^2.1.8"
   }
 }

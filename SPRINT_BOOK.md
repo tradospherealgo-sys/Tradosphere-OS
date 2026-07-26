@@ -201,8 +201,8 @@ Sprints are sequential. Nothing in a later sprint gets built early — out-of-se
 
 **Exit criteria:**
 - ✅ Paper orders fill against real market prices, verified against a simulated feed — `execution.test.ts`'s 11 unit cases (exact-price stamping, `NoMarketDataError` on missing data, deterministic fills) plus `price-source.integration.test.ts`'s 6 cases against real seeded Postgres `market_ticks` rows (fed by Sprint 3's `SimulatedBrokerClient` per D5): fills are the literal tick price, never invented, never a cached/stale one
-- ⬜ Portfolio P&L reconciles against journal entries for seeded test trades
-- ⬜ Analytics numbers match hand-calculation on the same seeded dataset
+- ✅ Portfolio P&L reconciles against journal entries for seeded test trades — `services/portfolio`'s `mtm.ts` computes `totalEquity = startingCash + realizedPnl + unrealizedPnl` directly from `journal_entries` (via `JournalTradeRecordSource`, no separate trades table); `test/mtm.test.ts`/`test/app.test.ts` cross-check that identity equals `cashBalance + positionsValue` independently against in-memory fakes, and `test/repository.integration.test.ts` proves the persisted snapshot form against real seeded Postgres (9 files, 91 tests total, `services/portfolio` suite)
+- ✅ Analytics numbers match hand-calculation on the same seeded dataset — `services/analytics`'s unit suites independently derive each expected stat outside the implementation, then assert exact equality against fixture trade/equity data: `trade-stats.test.ts` (win rate = 1 win / (1 win + 1 loss) = 0.5), `expectancy.test.ts` ((2/3)×150 − (1/3)×50), `risk-reward.test.ts` (planned R:R mean = 3; realized R:R = 150/50 = 3), `drawdown.test.ts` (peak 100→trough 80→peak 120→trough 60 = 0.5 max drawdown; 200→150 = 0.25), and `risk-adjusted-returns.test.ts` (Sharpe/Sortino hand-derived to 8 decimal places: 0.054772256 / 0.141421356) — 14 files, 142 tests total, plus `repository.integration.test.ts`'s 12 cases proving the persisted report form matches the same computation against real seeded Postgres (port 55440)
 
 ---
 
@@ -222,9 +222,9 @@ Sprints are sequential. Nothing in a later sprint gets built early — out-of-se
 | 9.5 | `packages/sdk`: generated typed client from the approved OpenAPI spec | Forge | 9.1 | SDK compiles, hits a live endpoint successfully |
 
 **Exit criteria:**
-- ✅/⬜ OpenAPI spec approved by Principal and covers every used endpoint
-- ✅/⬜ Gateway enforces auth and rate limits, verified by a deliberately bad request
-- ✅/⬜ Generated SDK compiles and successfully calls a live endpoint
+- ✅ OpenAPI spec approved by Principal and covers every used endpoint — `openapi.yaml` (80 path items, 103 operations, 109 schemas, zero duplicate `operationId`s/dangling `$ref`s, passes `openapi_spec_validator.validate()`), approved by Anshh
+- ✅ Gateway enforces auth and rate limits, verified by a deliberately bad request — `apps/api/test/app.test.ts` covers auth-required across all 20 in-process routes plus a dedicated 429-on-exceeded-limit test
+- ✅ Generated SDK compiles and successfully calls a live endpoint — `apps/api/test/sdk.test.ts` (4 tests, added to close Blocker B17): real `TradosphereClient` against a real bound `app.listen()` port, covering a public call, an authenticated round trip, a 401, and a 404-mapped `SdkHttpError`
 
 ---
 

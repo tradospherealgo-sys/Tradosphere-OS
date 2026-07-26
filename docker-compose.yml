@@ -76,6 +76,38 @@ services:
     ports:
       - "4001:4001"
 
+  market-data:
+    build:
+      context: .
+      dockerfile: services/market-data/Dockerfile
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Same postgres-service-hostname reasoning as the auth block above --
+      # `postgres` is the reachable hostname on the compose network, not
+      # .env's own localhost-pointed DATABASE_URL.
+      DATABASE_URL: postgresql://${POSTGRES_USER:?POSTGRES_USER must be set -- copy .env.example to .env and fill it in}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set -- copy .env.example to .env and fill it in}@postgres:5432/${POSTGRES_DB:?POSTGRES_DB must be set -- copy .env.example to .env and fill it in}
+      # Required by index.ts's requireEnv('REDIS_URL') -- createEventBus()
+      # publishes every normalized tick onto MARKET_TICKS_CHANNEL for
+      # TickStreamServer and any other subscriber (Sprint 9's gateway
+      # /stream route included). `redis` is the compose-network hostname,
+      # same reasoning as auth's REDIS_URL above -- this is a real runtime
+      # dependency, not a rate-limit-only one, so depends_on below is not
+      # optional the way it is for education/portfolio/analytics.
+      REDIS_URL: redis://redis:6379
+      MARKET_DATA_SERVICE_PORT: 4002
+      # Optional -- index.ts's getEnv('MARKET_DATA_SYMBOLS', ...) already
+      # falls back to this same three-symbol default, spelled out here so
+      # `docker compose config` shows the actual symbol list being ingested.
+      MARKET_DATA_SYMBOLS: ${MARKET_DATA_SYMBOLS:-RELIANCE,TCS,INFY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "4002:4002"
+
   education:
     build:
       context: .
@@ -98,12 +130,112 @@ services:
     ports:
       - "4003:4003"
 
-  # Placeholder — remaining services are added here as each sprint stands
-  # them up.
-  # api:
-  #   build: ./apps/api
-  #   depends_on: [postgres, redis]
-  #   ports: ["4000:4000"]
+  portfolio:
+    build:
+      context: .
+      dockerfile: services/portfolio/Dockerfile
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Same postgres-service-hostname reasoning as the auth/education
+      # blocks above -- `postgres` is the reachable hostname on the compose
+      # network, not .env's own localhost-pointed DATABASE_URL.
+      DATABASE_URL: postgresql://${POSTGRES_USER:?POSTGRES_USER must be set -- copy .env.example to .env and fill it in}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set -- copy .env.example to .env and fill it in}@postgres:5432/${POSTGRES_DB:?POSTGRES_DB must be set -- copy .env.example to .env and fill it in}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set -- copy .env.example to .env and fill it in with a real secret, never the example placeholder}
+      PORTFOLIO_SERVICE_PORT: 4004
+      # Sprint 8.3 / Decision D17: src/cash.ts reads this via
+      # getEnvNumber('PORTFOLIO_STARTING_CASH', 100_000) -- optional, unlike
+      # JWT_SECRET/DATABASE_URL above, so an unset value just keeps the
+      # 100_000 code default rather than crashing the container on boot.
+      PORTFOLIO_STARTING_CASH: ${PORTFOLIO_STARTING_CASH:-100000}
+    # No `redis` entry in depends_on -- like education, portfolio has no
+    # rate-limit plugin and never reads REDIS_URL.
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "4004:4004"
+
+  analytics:
+    build:
+      context: .
+      dockerfile: services/analytics/Dockerfile
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Same postgres-service-hostname reasoning as the auth/education/
+      # portfolio blocks above -- `postgres` is the reachable hostname on
+      # the compose network, not .env's own localhost-pointed DATABASE_URL.
+      # Sprint 8.4 / Decision D18: analytics reads journal_entries and
+      # portfolio_snapshots directly through this same connection via its
+      # own local read ports -- it never calls services/journal or
+      # services/portfolio over HTTP, so no depends_on entry for either.
+      DATABASE_URL: postgresql://${POSTGRES_USER:?POSTGRES_USER must be set -- copy .env.example to .env and fill it in}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set -- copy .env.example to .env and fill it in}@postgres:5432/${POSTGRES_DB:?POSTGRES_DB must be set -- copy .env.example to .env and fill it in}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set -- copy .env.example to .env and fill it in with a real secret, never the example placeholder}
+      ANALYTICS_SERVICE_PORT: 4005
+    # No `redis` entry in depends_on -- like education/portfolio, analytics
+    # has no rate-limit plugin and never reads REDIS_URL.
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "4005:4005"
+
+  # Task 9.15: the Sprint 9 gateway. Depends on every one of the five
+  # already-HTTP services being up (its proxy layer forwards to all five,
+  # task 9.1) plus postgres (its in-process routes read
+  # company_fundamentals/journal_entries directly) and redis (rate limiter +
+  # event bus, D19 (4)/(5)). `condition: service_started` (not
+  # service_healthy) for the five app services below -- none of them
+  # currently exposes a Compose-level healthcheck of its own (only
+  # postgres/redis do), so `service_started` is the strongest condition
+  # actually available; the gateway's own /health/services route (task
+  # 9.11/Decision D21) is the real, accurate liveness signal once running.
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Same postgres-service-hostname reasoning as every other service
+      # block above -- `postgres` is the reachable hostname on the compose
+      # network, not .env's own localhost-pointed DATABASE_URL.
+      DATABASE_URL: postgresql://${POSTGRES_USER:?POSTGRES_USER must be set -- copy .env.example to .env and fill it in}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set -- copy .env.example to .env and fill it in}@postgres:5432/${POSTGRES_DB:?POSTGRES_DB must be set -- copy .env.example to .env and fill it in}
+      # Required by index.ts's requireEnv('REDIS_URL') -- backs both the
+      # @fastify/rate-limit plugin and createEventBus() (D19 (4)/(5)).
+      # `redis` is the compose-network hostname, same reasoning as
+      # auth/market-data's own REDIS_URL above.
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set -- copy .env.example to .env and fill it in with a real secret, never the example placeholder}
+      API_PORT: 4000
+      GATEWAY_RATE_LIMIT_PER_MIN: ${GATEWAY_RATE_LIMIT_PER_MIN:-300}
+      # Compose-network service hostnames, not .env's own localhost-pointed
+      # defaults -- same distinction as DATABASE_URL/REDIS_URL above. Each
+      # name below is the literal Compose service key for that block in
+      # this same file.
+      AUTH_SERVICE_URL: http://auth:4001
+      MARKET_DATA_SERVICE_URL: http://market-data:4002
+      EDUCATION_SERVICE_URL: http://education:4003
+      PORTFOLIO_SERVICE_URL: http://portfolio:4004
+      ANALYTICS_SERVICE_URL: http://analytics:4005
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      auth:
+        condition: service_started
+      market-data:
+        condition: service_started
+      education:
+        condition: service_started
+      portfolio:
+        condition: service_started
+      analytics:
+        condition: service_started
+    ports:
+      - "4000:4000"
 
 volumes:
   postgres_data:

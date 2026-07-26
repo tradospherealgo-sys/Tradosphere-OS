@@ -1,4 +1,5 @@
-import { companyFundamentals, type Database } from '@tradosphere/database';
+import { desc, eq } from 'drizzle-orm';
+import { companyFundamentals, type CompanyFundamentalsRow, type Database } from '@tradosphere/database';
 import type { CompanyFinancials } from './fundamentals-ingest';
 
 export interface InsertResult {
@@ -13,6 +14,13 @@ export interface InsertResult {
 // MarketDataRepository (Sprint 3) and services/auth's UserRepository (Sprint 2).
 export interface FundamentalsRepository {
   insertFinancials(records: CompanyFinancials[]): Promise<InsertResult>;
+  // Sprint 9 task 9.2 prerequisite: the gateway's fundamentals route needs a
+  // read path, which never existed before now -- this service has only ever
+  // been written to by the ingestion job. Returns the most recently ingested
+  // reporting period for the symbol (by ingestedAt, not by reportingPeriod
+  // string sort, since periods aren't guaranteed to sort chronologically as
+  // text -- e.g. 'FY2026Q2' ingested before a late-arriving 'FY2025Q4' backfill).
+  getLatestBySymbol(symbol: string): Promise<CompanyFundamentalsRow | undefined>;
 }
 
 export class DrizzleFundamentalsRepository implements FundamentalsRepository {
@@ -46,5 +54,16 @@ export class DrizzleFundamentalsRepository implements FundamentalsRepository {
       inserted: inserted.length,
       skipped: records.length - inserted.length,
     };
+  }
+
+  async getLatestBySymbol(symbol: string): Promise<CompanyFundamentalsRow | undefined> {
+    const [row] = await this.db
+      .select()
+      .from(companyFundamentals)
+      .where(eq(companyFundamentals.symbol, symbol))
+      .orderBy(desc(companyFundamentals.ingestedAt))
+      .limit(1);
+
+    return row;
   }
 }

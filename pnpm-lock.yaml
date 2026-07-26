@@ -38,22 +38,91 @@ importers:
 
   apps/api:
     dependencies:
+      '@fastify/rate-limit':
+        specifier: ^9.1.0
+        version: 9.1.0
+      '@tradosphere/auth':
+        specifier: workspace:*
+        version: link:../../packages/auth
       '@tradosphere/config':
         specifier: workspace:*
         version: link:../../packages/config
+      '@tradosphere/database':
+        specifier: workspace:*
+        version: link:../../packages/database
+      '@tradosphere/event-bus':
+        specifier: workspace:*
+        version: link:../../packages/event-bus
       '@tradosphere/logger':
         specifier: workspace:*
         version: link:../../packages/logger
+      '@tradosphere/service-ai':
+        specifier: workspace:*
+        version: link:../../services/ai
+      '@tradosphere/service-cio':
+        specifier: workspace:*
+        version: link:../../services/cio
+      '@tradosphere/service-journal':
+        specifier: workspace:*
+        version: link:../../services/journal
+      '@tradosphere/service-paper-trading':
+        specifier: workspace:*
+        version: link:../../services/paper-trading
+      '@tradosphere/service-research':
+        specifier: workspace:*
+        version: link:../../services/research
       '@tradosphere/shared-types':
         specifier: workspace:*
         version: link:../../packages/shared-types
+      drizzle-orm:
+        specifier: ^0.36.4
+        version: 0.36.4(@opentelemetry/api@1.9.1)(@types/pg@8.20.0)(pg@8.22.0)
+      fastify:
+        specifier: ^4.28.1
+        version: 4.29.1
+      ioredis:
+        specifier: ^5.4.1
+        version: 5.11.1
+      pg:
+        specifier: ^8.13.1
+        version: 8.22.0
+      prom-client:
+        specifier: ^15.1.3
+        version: 15.1.3
+      ws:
+        specifier: ^8.18.0
+        version: 8.21.1
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
     devDependencies:
+      '@tradosphere/sdk':
+        specifier: workspace:*
+        version: link:../../packages/sdk
       '@types/node':
         specifier: ^22.10.0
         version: 22.20.1
+      '@types/pg':
+        specifier: ^8.11.10
+        version: 8.20.0
+      '@types/ws':
+        specifier: ^8.5.13
+        version: 8.18.1
+      embedded-postgres:
+        specifier: 18.4.0-beta.17
+        version: 18.4.0-beta.17
+      ioredis-mock:
+        specifier: ^8.9.0
+        version: 8.13.1(@types/ioredis-mock@8.2.7(ioredis@5.11.1))(ioredis@5.11.1)
+      tsx:
+        specifier: ^4.19.2
+        version: 4.23.1
       typescript:
         specifier: ^5.7.2
         version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@22.20.1)
 
   packages/auth:
     dependencies:
@@ -105,7 +174,7 @@ importers:
     dependencies:
       drizzle-orm:
         specifier: ^0.36.4
-        version: 0.36.4(@types/pg@8.20.0)(pg@8.22.0)
+        version: 0.36.4(@opentelemetry/api@1.9.1)(@types/pg@8.20.0)(pg@8.22.0)
       pg:
         specifier: ^8.13.1
         version: 8.22.0
@@ -167,6 +236,19 @@ importers:
         specifier: ^5.7.2
         version: 5.9.3
 
+  packages/sdk:
+    dependencies:
+      '@tradosphere/shared-types':
+        specifier: workspace:*
+        version: link:../shared-types
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.0
+        version: 22.20.1
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+
   packages/shared-types:
     devDependencies:
       typescript:
@@ -182,6 +264,55 @@ importers:
       '@types/node':
         specifier: ^22.10.0
         version: 22.20.1
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@22.20.1)
+
+  services/analytics:
+    dependencies:
+      '@tradosphere/auth':
+        specifier: workspace:*
+        version: link:../../packages/auth
+      '@tradosphere/config':
+        specifier: workspace:*
+        version: link:../../packages/config
+      '@tradosphere/database':
+        specifier: workspace:*
+        version: link:../../packages/database
+      '@tradosphere/logger':
+        specifier: workspace:*
+        version: link:../../packages/logger
+      '@tradosphere/shared-types':
+        specifier: workspace:*
+        version: link:../../packages/shared-types
+      drizzle-orm:
+        specifier: ^0.36.4
+        version: 0.36.4(@opentelemetry/api@1.9.1)(@types/pg@8.20.0)(pg@8.22.0)
+      fastify:
+        specifier: ^4.28.1
+        version: 4.29.1
+      pg:
+        specifier: ^8.13.1
+        version: 8.22.0
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.0
+        version: 22.20.1
+      '@types/pg':
+        specifier: ^8.11.10
+        version: 8.20.0
+      embedded-postgres:
+        specifier: 18.4.0-beta.17
+        version: 18.4.0-beta.17
+      tsx:
+        specifier: ^4.19.2
+        version: 4.23.1
       typescript:
         specifier: ^5.7.2
         version: 5.9.3
@@ -208,7 +339,7 @@ importers:
         version: link:../../packages/logger
       drizzle-orm:
         specifier: ^0.36.4
-        version: 0.36.4(@types/pg@8.20.0)(pg@8.22.0)
+        version: 0.36.4(@opentelemetry/api@1.9.1)(@types/pg@8.20.0)(pg@8.22.0)
       fastify:
         specifier: ^4.28.1
         version: 4.29.1
@@ -282,7 +413,7 @@ importers:
         version: link:../../packages/shared-types
       drizzle-orm:
         specifier: ^0.36.4
-        version: 0.36.4(@types/pg@8.20.0)(pg@8.22.0)
+        version: 0.36.4(@opentelemetry/api@1.9.1)(@types/pg@8.20.0)(pg@8.22.0)
       fastify:
         specifier: ^4.28.1
         version: 4.29.1
@@ -312,6 +443,37 @@ importers:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@22.20.1)
 
+  services/journal:
+    dependencies:
+      '@tradosphere/database':
+        specifier: workspace:*
+        version: link:../../packages/database
+      '@tradosphere/shared-types':
+        specifier: workspace:*
+        version: link:../../packages/shared-types
+      drizzle-orm:
+        specifier: ^0.36.4
+        version: 0.36.4(@opentelemetry/api@1.9.1)(@types/pg@8.20.0)(pg@8.22.0)
+      pg:
+        specifier: ^8.13.1
+        version: 8.22.0
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.0
+        version: 22.20.1
+      '@types/pg':
+        specifier: ^8.11.10
+        version: 8.20.0
+      embedded-postgres:
+        specifier: 18.4.0-beta.17
+        version: 18.4.0-beta.17
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@22.20.1)
+
   services/market-data:
     dependencies:
       '@tradosphere/broker-core':
@@ -334,7 +496,7 @@ importers:
         version: link:../../packages/shared-types
       drizzle-orm:
         specifier: ^0.36.4
-        version: 0.36.4(@types/pg@8.20.0)(pg@8.22.0)
+        version: 0.36.4(@opentelemetry/api@1.9.1)(@types/pg@8.20.0)(pg@8.22.0)
       fastify:
         specifier: ^4.28.1
         version: 4.29.1
@@ -367,6 +529,86 @@ importers:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@22.20.1)
 
+  services/paper-trading:
+    dependencies:
+      '@tradosphere/database':
+        specifier: workspace:*
+        version: link:../../packages/database
+      '@tradosphere/shared-types':
+        specifier: workspace:*
+        version: link:../../packages/shared-types
+      drizzle-orm:
+        specifier: ^0.36.4
+        version: 0.36.4(@opentelemetry/api@1.9.1)(@types/pg@8.20.0)(pg@8.22.0)
+      pg:
+        specifier: ^8.13.1
+        version: 8.22.0
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.0
+        version: 22.20.1
+      '@types/pg':
+        specifier: ^8.11.10
+        version: 8.20.0
+      embedded-postgres:
+        specifier: 18.4.0-beta.17
+        version: 18.4.0-beta.17
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@22.20.1)
+
+  services/portfolio:
+    dependencies:
+      '@tradosphere/auth':
+        specifier: workspace:*
+        version: link:../../packages/auth
+      '@tradosphere/config':
+        specifier: workspace:*
+        version: link:../../packages/config
+      '@tradosphere/database':
+        specifier: workspace:*
+        version: link:../../packages/database
+      '@tradosphere/logger':
+        specifier: workspace:*
+        version: link:../../packages/logger
+      '@tradosphere/shared-types':
+        specifier: workspace:*
+        version: link:../../packages/shared-types
+      drizzle-orm:
+        specifier: ^0.36.4
+        version: 0.36.4(@opentelemetry/api@1.9.1)(@types/pg@8.20.0)(pg@8.22.0)
+      fastify:
+        specifier: ^4.28.1
+        version: 4.29.1
+      pg:
+        specifier: ^8.13.1
+        version: 8.22.0
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.0
+        version: 22.20.1
+      '@types/pg':
+        specifier: ^8.11.10
+        version: 8.20.0
+      embedded-postgres:
+        specifier: 18.4.0-beta.17
+        version: 18.4.0-beta.17
+      tsx:
+        specifier: ^4.19.2
+        version: 4.23.1
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@22.20.1)
+
   services/research:
     dependencies:
       '@tradosphere/database':
@@ -375,6 +617,9 @@ importers:
       '@tradosphere/shared-types':
         specifier: workspace:*
         version: link:../../packages/shared-types
+      drizzle-orm:
+        specifier: ^0.36.4
+        version: 0.36.4(@opentelemetry/api@1.9.1)(@types/pg@8.20.0)(pg@8.22.0)
     devDependencies:
       '@types/node':
         specifier: ^22.10.0
@@ -1085,6 +1330,10 @@ packages:
     resolution: {integrity: sha512-oGB+UxlgWcgQkgwo8GcEGwemoTFt3FIO9ababBmaGwXIoBKZ+GTy0pP185beGg7Llih/NSHSV2XAs1lnznocSg==}
     engines: {node: '>= 8'}
 
+  '@opentelemetry/api@1.9.1':
+    resolution: {integrity: sha512-gLyJlPHPZYdAk1JENA9LeHejZe1Ti77/pTeFm/nMXmQH/HFZlcS/O2XJB+L8fkbrNSqhdtlvjBVjxwUYanNH5Q==}
+    engines: {node: '>=8.0.0'}
+
   '@pinojs/redact@0.4.0':
     resolution: {integrity: sha512-k2ENnmBugE/rzQfEcdWHcCY+/FM3VLzH9cYEsbdsoqrvzAKRhUZeRNhAZvB8OitQJ1TBed3yqWtdjzS6wJKBwg==}
 
@@ -1441,6 +1690,9 @@ packages:
 
   bcryptjs@2.4.3:
     resolution: {integrity: sha512-V/Hy/X9Vt7f3BbPJEi8BdVFMByHi+jNXrYkW3huaybV/kQ0KJg0Y6PkEMbn+zeT+i+SiKZ/HMqJGIIt4LZDqNQ==}
+
+  bintrees@1.0.2:
+    resolution: {integrity: sha512-VOMgTMwjAaUG580SXn3LacVgjurrbMme7ZZNYGSSV7mmtY6QQRh0Eg3pwIcntQ77DErK1L0NxkbetjcoXzVwKw==}
 
   brace-expansion@1.1.16:
     resolution: {integrity: sha512-IDw48K2/2kRkg9LdJxurvq3lV3aBgq0REY89duEqFRthjlPdXHKMj7EnQOXVckxzgisinf3nHfrcE2FufFLXMw==}
@@ -2362,6 +2614,10 @@ packages:
   process-warning@5.0.0:
     resolution: {integrity: sha512-a39t9ApHNx2L4+HBnQKqxxHNs1r7KF+Intd8Q/g1bUh6q0WIp9voPXJ/x0j+ZL45KF1pJd9+q2jLIRMfvEshkA==}
 
+  prom-client@15.1.3:
+    resolution: {integrity: sha512-6ZiOBfCywsD4k1BN9IX0uZhF+tJkV8q8llP64G5Hajs4JOeVLPCwpPVcpXy3BwYiUGgyJzsJJQeOIv7+hDSq8g==}
+    engines: {node: ^16 || ^18 || >=20}
+
   proxy-addr@2.0.7:
     resolution: {integrity: sha512-llQsMLSUDUPT44jdrU/O37qlnifitDP+ZwrmmZcoSKyLKvtZxpyV0n2/bD/N4tBAAZ/gJEdZU7KMraoK1+XYAg==}
     engines: {node: '>= 0.10'}
@@ -2551,6 +2807,9 @@ packages:
   supports-color@7.2.0:
     resolution: {integrity: sha512-qpCAvRl9stuOHveKsn7HncJRvv501qIacKzQlO/+Lwxc9+0q2wLyv4Dfvt80/DPn2pqOBsJdDiogXGR9+OvwRw==}
     engines: {node: '>=8'}
+
+  tdigest@0.1.2:
+    resolution: {integrity: sha512-+G0LLgjjo9BZX2MfdvPfH+MKLCrxlXSYec5DaPYP1fe6Iyhf0/fSmJ0bFiZ1F8BT6cGXl2LpltQptzjXKWEkKA==}
 
   text-table@0.2.0:
     resolution: {integrity: sha512-N+8UisAXDGk8PFXP4HAzVR9nbfmVJ3zYLAWiTIoqC5v5isinhr+r5uaO8+7r3BMfuNIufIsA7RdpVgacC2cSpw==}
@@ -3134,6 +3393,8 @@ snapshots:
       '@nodelib/fs.scandir': 2.1.5
       fastq: 1.20.1
 
+  '@opentelemetry/api@1.9.1': {}
+
   '@pinojs/redact@0.4.0': {}
 
   '@rollup/rollup-android-arm-eabi@4.62.2':
@@ -3444,6 +3705,8 @@ snapshots:
 
   bcryptjs@2.4.3: {}
 
+  bintrees@1.0.2: {}
+
   brace-expansion@1.1.16:
     dependencies:
       balanced-match: 1.0.2
@@ -3567,8 +3830,9 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  drizzle-orm@0.36.4(@types/pg@8.20.0)(pg@8.22.0):
+  drizzle-orm@0.36.4(@opentelemetry/api@1.9.1)(@types/pg@8.20.0)(pg@8.22.0):
     optionalDependencies:
+      '@opentelemetry/api': 1.9.1
       '@types/pg': 8.20.0
       pg: 8.22.0
 
@@ -4394,6 +4658,11 @@ snapshots:
 
   process-warning@5.0.0: {}
 
+  prom-client@15.1.3:
+    dependencies:
+      '@opentelemetry/api': 1.9.1
+      tdigest: 0.1.2
+
   proxy-addr@2.0.7:
     dependencies:
       forwarded: 0.2.0
@@ -4571,6 +4840,10 @@ snapshots:
   supports-color@7.2.0:
     dependencies:
       has-flag: 4.0.0
+
+  tdigest@0.1.2:
+    dependencies:
+      bintrees: 1.0.2
 
   text-table@0.2.0: {}
 

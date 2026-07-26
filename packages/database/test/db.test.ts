@@ -78,6 +78,7 @@ describe('database migrations (pg-mem, raw SQL)', () => {
       `SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name;`,
     );
     expect(tables.map((t: any) => t.table_name)).toEqual([
+      'analytics_reports',
       'company_fundamentals',
       'courses',
       'education_categories',
@@ -89,6 +90,7 @@ describe('database migrations (pg-mem, raw SQL)', () => {
       'journal_entries',
       'lessons',
       'market_ticks',
+      'portfolio_snapshots',
       'quiz_attempts',
       'quiz_questions',
       'quizzes',
@@ -136,6 +138,8 @@ describe('database migrations (pg-mem, raw SQL)', () => {
           'DROP TABLE IF EXISTS market_ticks CASCADE',
           'DROP TABLE IF EXISTS company_fundamentals CASCADE',
           'DROP TABLE IF EXISTS journal_entries CASCADE',
+          'DROP TABLE IF EXISTS portfolio_snapshots CASCADE',
+          'DROP TABLE IF EXISTS analytics_reports CASCADE',
           'DROP TABLE IF EXISTS quiz_attempts CASCADE',
           'DROP TABLE IF EXISTS quiz_questions CASCADE',
           'DROP TABLE IF EXISTS quizzes CASCADE',
@@ -397,6 +401,74 @@ describe('journal_entries schema (Sprint 8 task 8.2)', () => {
     expect(row.recommended_direction).toBeNull();
     expect(row.cio_verdict).toBeNull();
     expect(row.status).toBe('open'); // schema default
+  });
+});
+
+describe('portfolio_snapshots schema (Sprint 8 task 8.3)', () => {
+  let mem: ReturnType<typeof newDb>;
+
+  beforeAll(() => {
+    mem = newDb({ autoCreateForeignKeyIndices: true });
+    registerTsvectorType(mem);
+    let counter = 0;
+    mem.public.registerFunction({
+      name: 'gen_random_uuid',
+      returns: 'uuid' as any,
+      impure: true,
+      implementation: () => `00000000-0000-4000-8000-${(++counter).toString().padStart(12, '0')}`,
+    });
+    mem.public.none(loadUpSql());
+  });
+
+  it('sets user_id to NULL when the referencing user is deleted (ON DELETE SET NULL, Decision D17)', () => {
+    const [user] = mem.public.many(
+      `INSERT INTO users (email, password_hash, role) VALUES ('portfolio-owner@tradosphere.os', 'x', 'trader') RETURNING id;`,
+    );
+    const [snapshot] = mem.public.many(
+      `INSERT INTO portfolio_snapshots (user_id, cash_balance, positions_value, realized_pnl, unrealized_pnl, total_equity, as_of)
+       VALUES ('${user.id}', 100000, 25000, 1000, 500, 101500, now()) RETURNING id;`,
+    );
+
+    mem.public.none(`DELETE FROM users WHERE id = '${user.id}';`);
+
+    // Same historical-record precedent journal_entries already established:
+    // a portfolio snapshot is account history, not user-owned content -- it
+    // survives the user's deletion with user_id set to NULL.
+    const rows = mem.public.many(`SELECT * FROM portfolio_snapshots WHERE id = '${snapshot.id}';`);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].user_id).toBeNull();
+    expect(rows[0].total_equity).toBe(101500);
+  });
+
+  it('stores a full snapshot row and satisfies the totalEquity = cashBalance + positionsValue identity (Decision D17)', () => {
+    mem.public.none(
+      `INSERT INTO portfolio_snapshots (cash_balance, positions_value, realized_pnl, unrealized_pnl, total_equity, label, as_of)
+       VALUES (94000, 8500, 2000, 500, 102500, 'daily-mtm', now());`,
+    );
+    const [row] = mem.public.many(`SELECT * FROM portfolio_snapshots WHERE label = 'daily-mtm';`);
+    expect(row.user_id).toBeNull();
+    expect(row.cash_balance + row.positions_value).toBe(row.total_equity);
+    expect(row.realized_pnl + row.unrealized_pnl).toBe(2500);
+  });
+
+  it('allows multiple snapshots per user, orderable by as_of (equity curve/history use case)', () => {
+    const [user] = mem.public.many(
+      `INSERT INTO users (email, password_hash, role) VALUES ('curve-user@tradosphere.os', 'x', 'trader') RETURNING id;`,
+    );
+    const snap = (equity: number, asOf: string) =>
+      mem.public.none(
+        `INSERT INTO portfolio_snapshots (user_id, cash_balance, positions_value, realized_pnl, unrealized_pnl, total_equity, as_of)
+         VALUES ('${user.id}', ${equity}, 0, 0, 0, ${equity}, '${asOf}');`,
+      );
+    snap(100000, '2026-07-18T00:00:00Z');
+    snap(101200, '2026-07-19T00:00:00Z');
+    snap(100800, '2026-07-20T00:00:00Z');
+
+    const rows = mem.public.many(
+      `SELECT * FROM portfolio_snapshots WHERE user_id = '${user.id}' ORDER BY as_of ASC;`,
+    );
+    expect(rows).toHaveLength(3);
+    expect(rows.map((r: any) => r.total_equity)).toEqual([100000, 101200, 100800]);
   });
 });
 

@@ -7,6 +7,8 @@ export default {
     './src/fundamentals-schema.ts',
     './src/education-schema.ts',
     './src/journal-schema.ts',
+    './src/portfolio-schema.ts',
+    './src/analytics-schema.ts',
   ],
   out: './migrations',
   dialect: 'postgresql',

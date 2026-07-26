@@ -3,5 +3,7 @@ export * from './market-data-schema';
 export * from './fundamentals-schema';
 export * from './education-schema';
 export * from './journal-schema';
+export * from './portfolio-schema';
+export * from './analytics-schema';
 export * from './client';
 export * from './migrate';
