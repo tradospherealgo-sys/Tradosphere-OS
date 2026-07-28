@@ -7,7 +7,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "lint": "eslint src --ext .ts",
-    "test": "echo \"no tests yet\""
+    "test": "echo \"tests for this package live in apps/api/test/sdk.test.ts (real TradosphereClient against a live gateway) -- see docs/architecture/api-gateway.md\""
   },
   "dependencies": {
     "@tradosphere/shared-types": "workspace:*"

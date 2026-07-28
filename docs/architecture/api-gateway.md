@@ -180,3 +180,19 @@ callers supply the data today.
   test 58/58 (0 failures). Full monorepo `pnpm build`/`pnpm lint`/`pnpm
   test` from a fresh sync -- 19/19 build tasks, 19/19 lint tasks, 38/38
   test tasks, zero regressions across every service and shared package.
+- **Blocker B17** (found during this same sprint's final verification, before
+  Principal sign-off): `packages/sdk` had zero tests and nothing repo-wide
+  ever instantiated `TradosphereClient` -- the suite above proves the gateway
+  works via `inject()`, which never touches the SDK's own transport code.
+  Closed with `apps/api/test/sdk.test.ts` (4 tests) driving a real
+  `TradosphereClient` against a real bound `app.listen()` socket. After this
+  fix: `@tradosphere/api` alone -- 62/62 (0 failures). Full monorepo build
+  19/19, lint 19/19, test 38/38 tasks, zero regressions.
+- **Blocker B18** (found by the independent `ai-team` audit, post-sign-off):
+  `pnpm-lock.yaml` had never been regenerated after `packages/sdk` was
+  created or after B17 added `@tradosphere/sdk` as a devDependency of
+  `apps/api`, so `pnpm install --frozen-lockfile` -- CI's first step --
+  failed outright. Resolved: lockfile regenerated and committed (see
+  `EXECUTION_BOOK.md`'s Blocker Log); `pnpm install --frozen-lockfile`
+  independently reconfirmed clean, alongside build 19/19, lint 19/19, test
+  38/38.
