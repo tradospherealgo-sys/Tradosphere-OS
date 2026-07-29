@@ -33,12 +33,12 @@ function errorMessage(err: unknown): string {
   return err instanceof SdkHttpError ? err.message : 'Could not reach the analytics service.';
 }
 
-function pct(value?: number): string {
-  return value === undefined ? '—' : `${(value * 100).toFixed(1)}%`;
+function pct(value?: number | null): string {
+  return value == null ? '—' : `${(value * 100).toFixed(1)}%`;
 }
 
-function num(value?: number): string {
-  return value === undefined ? '—' : value.toFixed(2);
+function num(value?: number | null): string {
+  return value == null ? '—' : value.toFixed(2);
 }
 
 export function AnalyticsDashboard() {

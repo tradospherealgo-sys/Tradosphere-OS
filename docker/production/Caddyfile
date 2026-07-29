@@ -1,0 +1,62 @@
+# Caddy v2 configuration for Tradosphere OS
+# Replace YOUR_DOMAIN with your actual domain before deploying
+# Caddy automatically provisions Let's Encrypt SSL certificates
+
+# ─── Production (with domain & SSL) ─────────────────────────────────────
+# Uncomment and replace YOUR_DOMAIN with your real domain:
+#
+# YOUR_DOMAIN {
+#     # Reverse proxy to Next.js frontend
+#     handle_path /api/* {
+#         rewrite * /{path}
+#         reverse_proxy api:4000
+#     }
+#
+#     # WebSocket support for market ticks and CIO verdicts
+#     handle_path /stream/* {
+#         rewrite * /{path}
+#         reverse_proxy api:4000
+#     }
+#
+#     # Everything else goes to Next.js
+#     handle {
+#         reverse_proxy web:3000
+#     }
+#
+#     # Security headers
+#     header {
+#         X-Content-Type-Options "nosniff"
+#         X-Frame-Options "DENY"
+#         X-XSS-Protection "1; mode=block"
+#         Referrer-Policy "strict-origin-when-cross-origin"
+#         -Server
+#     }
+#
+#     # Gzip compression
+#     encode gzip
+# }
+
+# ─── Local development (HTTP only, no SSL) ──────────────────────────────
+# This runs by default — comment out for production
+http://localhost:8080 {
+    handle_path /api/* {
+        rewrite * /{path}
+        reverse_proxy api:4000
+    }
+
+    handle_path /stream/* {
+        rewrite * /{path}
+        reverse_proxy api:4000
+    }
+
+    handle {
+        reverse_proxy web:3000
+    }
+
+    header {
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+    }
+
+    encode gzip
+}

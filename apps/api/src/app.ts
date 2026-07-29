@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import rateLimit from '@fastify/rate-limit';
+import cors from '@fastify/cors';
 import client from 'prom-client';
 import type Redis from 'ioredis';
 import type { Logger } from '@tradosphere/logger';
@@ -29,8 +30,18 @@ import {
   runAgent,
 } from '@tradosphere/service-ai';
 import { buildCioVerdict } from '@tradosphere/service-cio';
-import { placeOrder, NoMarketDataError, InvalidOrderError, type PriceSource } from '@tradosphere/service-paper-trading';
-import { NotFoundError, AlreadyClosedError, InvalidOutcomeError, type JournalRepository } from '@tradosphere/service-journal';
+import {
+  placeOrder,
+  NoMarketDataError,
+  InvalidOrderError,
+  type PriceSource,
+} from '@tradosphere/service-paper-trading';
+import {
+  NotFoundError,
+  AlreadyClosedError,
+  InvalidOutcomeError,
+  type JournalRepository,
+} from '@tradosphere/service-journal';
 import { registerProxy, type ProxyTarget } from './proxy';
 import {
   validateBody,
@@ -166,6 +177,14 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- see services/auth/src/app.ts for why
     logger: deps.logger as any,
     genReqId: () => randomUUID(),
+  });
+
+  // CORS: allow the Next.js frontend at localhost:3000 to call the gateway
+  await app.register(cors, {
+    origin: 'http://localhost:3000',
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: true,
   });
 
   // D19 sub-part (4): registered globally, awaited before any route is
@@ -336,7 +355,9 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     const validation = validateBody(analyzeQuantBodySchema, request.body);
     if (!validation.success) return reply.code(400).send(validation.failure);
     const { symbol, bars, period } = validation.data;
-    return reply.send(period === undefined ? analyzeQuant(symbol, bars) : analyzeQuant(symbol, bars, period));
+    return reply.send(
+      period === undefined ? analyzeQuant(symbol, bars) : analyzeQuant(symbol, bars, period),
+    );
   });
 
   // ---------------------------------------------------------------------
@@ -430,7 +451,10 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     const validation = validateBody(placeOrderBodySchema, request.body);
     if (!validation.success) return reply.code(400).send(validation.failure);
     try {
-      const fill = await placeOrder(validation.data, { priceSource: deps.priceSource, now: deps.now });
+      const fill = await placeOrder(validation.data, {
+        priceSource: deps.priceSource,
+        now: deps.now,
+      });
       return reply.send(fill);
     } catch (err) {
       if (err instanceof NoMarketDataError) {
@@ -461,7 +485,10 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   app.post('/v1/journal/entries', { preHandler: authed }, async (request, reply) => {
     const validation = validateBody(createJournalEntryBodySchema, request.body);
     if (!validation.success) return reply.code(400).send(validation.failure);
-    const entry = await deps.journalRepository.create({ ...validation.data, userId: request.authUser!.sub });
+    const entry = await deps.journalRepository.create({
+      ...validation.data,
+      userId: request.authUser!.sub,
+    });
     return reply.code(201).send(entry);
   });
 
@@ -474,7 +501,8 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     const validation = validateBody(idParamSchema, request.params);
     if (!validation.success) return reply.code(400).send(validation.failure);
     const entry = await deps.journalRepository.getById(validation.data.id);
-    if (!entry) return reply.code(404).send({ error: `journal entry not found: ${validation.data.id}` });
+    if (!entry)
+      return reply.code(404).send({ error: `journal entry not found: ${validation.data.id}` });
     return reply.send(entry);
   });
 
@@ -484,7 +512,10 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     const bodyValidation = validateBody(recordOutcomeBodySchema, request.body);
     if (!bodyValidation.success) return reply.code(400).send(bodyValidation.failure);
     try {
-      const entry = await deps.journalRepository.recordOutcome(paramValidation.data.id, bodyValidation.data);
+      const entry = await deps.journalRepository.recordOutcome(
+        paramValidation.data.id,
+        bodyValidation.data,
+      );
       return reply.send(entry);
     } catch (err) {
       if (err instanceof NotFoundError) {

@@ -2,38 +2,167 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Task 10.1 (Foundation): theme system. Every screen must read colors from
-   these CSS variables (via the Tailwind tokens in tailwind.config.ts), never
-   a hardcoded hex value, so switching [data-theme] repaints the whole app. */
+/* ─── Theme System ──────────────────────────────────────── */
 :root,
 [data-theme='light'] {
-  --color-bg: 250 250 252;
+  --color-bg: 248 249 252;
   --color-surface: 255 255 255;
-  --color-border: 226 229 235;
-  --color-text: 17 24 39;
-  --color-muted: 107 114 128;
+  --color-border: 226 229 238;
+  --color-text: 15 23 42;
+  --color-muted: 100 116 139;
   --color-accent: 37 99 235;
   --color-danger: 220 38 38;
   --color-success: 22 163 74;
 }
 
 [data-theme='dark'] {
-  --color-bg: 10 12 16;
-  --color-surface: 20 23 30;
-  --color-border: 39 43 53;
-  --color-text: 237 239 244;
-  --color-muted: 148 155 168;
-  --color-accent: 96 148 255;
-  --color-danger: 248 113 113;
-  --color-success: 74 222 128;
+  --color-bg: 5 7 12;
+  --color-surface: 13 17 26;
+  --color-border: 30 35 48;
+  --color-text: 240 242 248;
+  --color-muted: 130 140 160;
+  --color-accent: 80 140 255;
+  --color-danger: 248 80 80;
+  --color-success: 50 210 100;
 }
 
+/* ─── Base ──────────────────────────────────────────────── */
 html,
 body {
   background-color: rgb(var(--color-bg));
   color: rgb(var(--color-text));
+  scroll-behavior: smooth;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 * {
   border-color: rgb(var(--color-border));
+}
+
+::selection {
+  background-color: rgb(var(--color-accent) / 0.25);
+  color: rgb(var(--color-text));
+}
+
+/* ─── Scrollbar ─────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgb(var(--color-border));
+  border-radius: 2px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgb(var(--color-muted) / 0.4);
+}
+
+/* ─── Scrollbar ─────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgb(var(--color-border));
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgb(var(--color-muted));
+}
+
+/* ─── Theme Transition ──────────────────────────────────── */
+html,
+html *,
+html *::before,
+html *::after {
+  transition: background-color 0.3s ease, border-color 0.3s ease, color 0.2s ease,
+    box-shadow 0.2s ease;
+}
+
+/* ─── Animations ────────────────────────────────────────── */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(16px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes pulseGlow {
+  0%, 100% { box-shadow: 0 0 0 0 rgb(var(--color-accent) / 0.4); }
+  50%      { box-shadow: 0 0 0 8px rgb(var(--color-accent) / 0); }
+}
+
+@keyframes pulseGlowScale {
+  0%, 100% { opacity: 0.3; transform: scale(1); }
+  50%      { opacity: 0.5; transform: scale(1.05); }
+}
+
+@keyframes scaleIn {
+  from { transform: scale(0.95); opacity: 0; }
+  to   { transform: scale(1); opacity: 1; }
+}
+
+@keyframes slideDown {
+  from { opacity: 0; transform: translateY(-8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.4s ease-out forwards;
+}
+
+.animate-fade-in-up {
+  animation: fadeInUp 0.5s ease-out forwards;
+}
+
+.animate-slide-down {
+  animation: slideDown 0.3s ease-out forwards;
+}
+
+.animate-spin {
+  animation: spin 0.8s linear infinite;
+}
+
+.animate-pulseGlow-scale {
+  animation: pulseGlowScale 3s ease-in-out infinite;
+}
+
+/* Stagger children */
+.animate-stagger > * {
+  opacity: 0;
+  animation: fadeInUp 0.4s ease-out forwards;
+}
+.animate-stagger > *:nth-child(1) { animation-delay: 0.05s; }
+.animate-stagger > *:nth-child(2) { animation-delay: 0.1s; }
+.animate-stagger > *:nth-child(3) { animation-delay: 0.15s; }
+.animate-stagger > *:nth-child(4) { animation-delay: 0.2s; }
+.animate-stagger > *:nth-child(5) { animation-delay: 0.25s; }
+.animate-stagger > *:nth-child(6) { animation-delay: 0.3s; }
+.animate-stagger > *:nth-child(7) { animation-delay: 0.35s; }
+.animate-stagger > *:nth-child(8) { animation-delay: 0.4s; }
+
+/* ─── Card hover effect ─────────────────────────────────── */
+.card-hover {
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+.card-hover:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.08);
+}
+[data-theme='dark'] .card-hover:hover {
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.3);
 }

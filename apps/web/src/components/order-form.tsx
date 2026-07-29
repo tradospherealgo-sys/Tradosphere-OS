@@ -1,17 +1,35 @@
 'use client';
 
-// Task 10.4: paper trading order entry. A single real call to POST
-// /v1/paper-trading/orders (Decision D14 -- fill price is always the latest
-// real market_ticks row for the symbol, never fabricated or a stale-as-fresh
-// price; a symbol with no tick on record is rejected server-side, surfaced
-// here as a real error, never a guessed price). Nothing is persisted by
-// this call alone (D16) -- the returned Fill only becomes a durable record
-// once explicitly saved to the journal, which is why the result view offers
-// a second, separate "Save to journal" action rather than auto-saving.
-import { useState } from 'react';
+// Task 10.4: paper trading order entry. Uses a dropdown for symbol selection
+// with autocomplete filtering. Validates sell orders against current position.
+import { useState, useMemo, useRef, useEffect } from 'react';
 import { SdkHttpError } from '@tradosphere/sdk';
 import type { Fill, OrderSide } from '@tradosphere/sdk';
 import { sdk } from '@/lib/sdk';
+
+// Common NSE symbols for quick selection
+const COMMON_SYMBOLS = [
+  'RELIANCE',
+  'TCS',
+  'INFY',
+  'HDFCBANK',
+  'ICICIBANK',
+  'SBIN',
+  'BHARTIARTL',
+  'ITC',
+  'WIPRO',
+  'AXISBANK',
+  'BAJFINANCE',
+  'MARUTI',
+  'TITAN',
+  'ASIANPAINT',
+  'NTPC',
+  'ONGC',
+  'POWERGRID',
+  'M&M',
+  'SUNPHARMA',
+  'HINDUNILVR',
+];
 
 type OrderState =
   | { phase: 'idle' }
@@ -27,16 +45,108 @@ type JournalSaveState =
 
 export function OrderForm() {
   const [symbol, setSymbol] = useState('');
+  const [showDropdown, setShowDropdown] = useState(false);
   const [side, setSide] = useState<OrderSide>('buy');
   const [quantity, setQuantity] = useState('1');
   const [orderState, setOrderState] = useState<OrderState>({ phase: 'idle' });
   const [journalState, setJournalState] = useState<JournalSaveState>({ phase: 'idle' });
+  const [owning, setOwning] = useState<number | null>(null);
+  const [positionCheck, setPositionCheck] = useState<
+    'idle' | 'loading' | 'none' | 'long' | 'short'
+  >('idle');
+  const dropdownRef = useRef<HTMLDivElement>(null);
+  const debounceRef = useRef<NodeJS.Timeout | null>(null);
+
+  const filteredSymbols = useMemo(() => {
+    if (!symbol) return COMMON_SYMBOLS.slice(0, 8);
+    return COMMON_SYMBOLS.filter((s) => s.startsWith(symbol.toUpperCase())).slice(0, 8);
+  }, [symbol]);
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setShowDropdown(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  // Check position synchronously before submission
+  async function checkPositionBeforeSell(
+    sym: string,
+  ): Promise<{ canSell: boolean; owned: number; reason?: string }> {
+    try {
+      const summary = await sdk.portfolio.summary();
+      const pos = summary.positions.find((p) => p.symbol === sym);
+      if (!pos || pos.quantity <= 0) {
+        return {
+          canSell: false,
+          owned: 0,
+          reason: `You don't own any ${sym} shares to sell. Buy some first.`,
+        };
+      }
+      return { canSell: true, owned: pos.quantity };
+    } catch {
+      return {
+        canSell: false,
+        owned: 0,
+        reason: 'Could not check your portfolio. Make sure the backend is running.',
+      };
+    }
+  }
+
+  // Background position check for display (debounced)
+  useEffect(() => {
+    if (side === 'sell' && symbol.trim().length > 1) {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+      debounceRef.current = setTimeout(async () => {
+        setPositionCheck('loading');
+        try {
+          const summary = await sdk.portfolio.summary();
+          const pos = summary.positions.find((p) => p.symbol === symbol.trim());
+          if (pos) {
+            setOwning(pos.quantity);
+            setPositionCheck(pos.direction === 'long' ? 'long' : 'short');
+          } else {
+            setOwning(0);
+            setPositionCheck('none');
+          }
+        } catch {
+          setPositionCheck('idle');
+          setOwning(null);
+        }
+      }, 300);
+    } else {
+      setOwning(null);
+      setPositionCheck('idle');
+    }
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+  }, [side, symbol]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    const trimmedSymbol = symbol.trim();
+    const trimmedSymbol = symbol.trim().toUpperCase();
     const qty = Number(quantity);
     if (!trimmedSymbol || !Number.isFinite(qty) || qty <= 0) return;
+
+    // For sells: check position right now (fresh API call, not debounced state)
+    if (side === 'sell') {
+      const check = await checkPositionBeforeSell(trimmedSymbol);
+      if (!check.canSell) {
+        setOrderState({ phase: 'error', message: check.reason || 'Cannot sell.' });
+        return;
+      }
+      if (qty > check.owned) {
+        setOrderState({
+          phase: 'error',
+          message: `Cannot sell ${qty} shares — you only own ${check.owned} ${trimmedSymbol}.`,
+        });
+        return;
+      }
+    }
 
     setOrderState({ phase: 'loading' });
     setJournalState({ phase: 'idle' });
@@ -46,6 +156,10 @@ export function OrderForm() {
         side,
         quantity: qty,
       });
+      // Update owning after sell (only if we had a valid owning value)
+      if (side === 'sell' && owning !== null && Number.isFinite(owning)) {
+        setOwning(Math.max(0, owning - qty));
+      }
       setOrderState({ phase: 'result', fill });
     } catch (err) {
       const message =
@@ -73,69 +187,102 @@ export function OrderForm() {
     Number(quantity) <= 0;
 
   return (
-    <section
-      className="rounded-lg border border-border bg-surface p-4"
-      aria-labelledby="order-form-heading"
-    >
-      <h2 id="order-form-heading" className="text-sm font-medium">
-        Place Paper Order
-      </h2>
-      <p className="mt-1 text-xs text-muted">
-        Fills at the real latest market price for the symbol. No fabricated or cached-as-fresh price
-        is ever used -- a symbol with no recent tick is rejected, not guessed.
-      </p>
+    <section className="space-y-4">
+      {/* Side toggle */}
+      <div className="flex rounded-xl bg-bg/50 p-0.5">
+        <button
+          type="button"
+          onClick={() => setSide('buy')}
+          className={`flex-1 rounded-lg py-2 text-sm font-semibold transition-all ${
+            side === 'buy' ? 'bg-success/10 text-success shadow-sm' : 'text-muted hover:text-text'
+          }`}
+        >
+          Buy
+        </button>
+        <button
+          type="button"
+          onClick={() => setSide('sell')}
+          className={`flex-1 rounded-lg py-2 text-sm font-semibold transition-all ${
+            side === 'sell' ? 'bg-danger/10 text-danger shadow-sm' : 'text-muted hover:text-text'
+          }`}
+        >
+          Sell
+        </button>
+      </div>
 
-      <form onSubmit={handleSubmit} className="mt-3 flex flex-wrap items-end gap-2">
-        <div>
-          <label htmlFor="order-symbol" className="block text-xs text-muted">
-            Symbol
-          </label>
+      <form onSubmit={handleSubmit} className="space-y-3">
+        {/* Symbol with autocomplete */}
+        <div className="relative" ref={dropdownRef}>
+          <label className="text-xs font-medium text-muted">Symbol</label>
           <input
-            id="order-symbol"
             type="text"
             value={symbol}
-            onChange={(e) => setSymbol(e.target.value.toUpperCase())}
-            placeholder="e.g. RELIANCE"
-            className="mt-1 w-36 rounded-md border border-border bg-bg px-3 py-1.5 text-sm uppercase tracking-wide"
+            onChange={(e) => {
+              setSymbol(e.target.value.toUpperCase());
+              setShowDropdown(true);
+            }}
+            onFocus={() => setShowDropdown(true)}
+            placeholder="Search symbol…"
+            className="mt-1 h-9 w-full rounded-xl border border-border bg-bg/50 px-3 text-sm uppercase tracking-wide transition-all focus:border-accent/50 focus:outline-none focus:ring-2 focus:ring-accent/10"
           />
+          {showDropdown && filteredSymbols.length > 0 && (
+            <div className="absolute z-10 mt-1 w-full rounded-xl border border-border bg-surface shadow-lg">
+              {filteredSymbols.map((s) => (
+                <button
+                  key={s}
+                  type="button"
+                  onClick={() => {
+                    setSymbol(s);
+                    setShowDropdown(false);
+                  }}
+                  className={`w-full px-3 py-2 text-left text-sm uppercase tracking-wide transition-colors hover:bg-bg ${
+                    symbol === s ? 'font-semibold text-accent' : 'text-text'
+                  }`}
+                >
+                  {s}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
 
+        {/* Quantity */}
         <div>
-          <label htmlFor="order-side" className="block text-xs text-muted">
-            Side
-          </label>
-          <select
-            id="order-side"
-            value={side}
-            onChange={(e) => setSide(e.target.value as OrderSide)}
-            className="mt-1 rounded-md border border-border bg-bg px-3 py-1.5 text-sm"
-          >
-            <option value="buy">Buy</option>
-            <option value="sell">Sell</option>
-          </select>
-        </div>
-
-        <div>
-          <label htmlFor="order-quantity" className="block text-xs text-muted">
-            Quantity
-          </label>
+          <label className="text-xs font-medium text-muted">Quantity</label>
           <input
-            id="order-quantity"
             type="number"
             min="1"
             step="1"
             value={quantity}
             onChange={(e) => setQuantity(e.target.value)}
-            className="mt-1 w-24 rounded-md border border-border bg-bg px-3 py-1.5 text-sm"
+            className="mt-1 h-9 w-full rounded-xl border border-border bg-bg/50 px-3 text-sm transition-all focus:border-accent/50 focus:outline-none focus:ring-2 focus:ring-accent/10"
           />
+        </div>
+
+        {/* Estimated values */}
+        <div className="rounded-xl bg-bg/30 p-3 text-xs text-muted">
+          <div className="flex justify-between">
+            <span>Type</span>
+            <span className="font-medium text-text capitalize">Market · {side}</span>
+          </div>
+          <div className="mt-1 flex justify-between">
+            <span>Qty</span>
+            <span className="font-medium text-text">{quantity || '0'}</span>
+          </div>
         </div>
 
         <button
           type="submit"
           disabled={submitDisabled}
-          className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-bg disabled:opacity-50"
+          className={`h-10 w-full rounded-xl text-sm font-bold transition-all ${
+            side === 'buy'
+              ? 'bg-success text-white shadow-lg shadow-success/20 hover:brightness-110'
+              : 'bg-danger text-white shadow-lg shadow-danger/20 hover:brightness-110'
+          } disabled:opacity-50`}
         >
-          {orderState.phase === 'loading' ? 'Placing…' : 'Place order'}
+          {orderState.phase === 'loading'
+            ? 'Placing…'
+            : `${side === 'buy' ? 'Buy' : 'Sell'} ${symbol || '—'}`}
         </button>
       </form>
 

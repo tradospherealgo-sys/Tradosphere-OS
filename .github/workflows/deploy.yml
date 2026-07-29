@@ -1,0 +1,236 @@
+name: Deploy Tradosphere OS
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAMESPACE: tradosphere
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  # ─── Build & Test ─────────────────────────────────────────────────────
+  build-and-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: tradosphere_test
+          POSTGRES_PASSWORD: tradosphere_test
+          POSTGRES_DB: tradosphere_os_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U tradosphere_test -d tradosphere_os_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run linter
+        run: pnpm lint
+
+      - name: Build all packages
+        run: pnpm build
+        env:
+          DATABASE_URL: postgresql://tradosphere_test:tradosphere_test@localhost:5432/tradosphere_os_test
+          REDIS_URL: redis://localhost:6379
+
+      - name: Run tests
+        run: pnpm test
+        env:
+          DATABASE_URL: postgresql://tradosphere_test:tradosphere_test@localhost:5432/tradosphere_os_test
+          REDIS_URL: redis://localhost:6379
+          JWT_SECRET: test-secret-not-for-production
+          LOG_LEVEL: silent
+
+  # ─── Build & Push Docker Images (main only) ───────────────────────────
+  docker-build:
+    name: Build & Push Docker Images
+    needs: build-and-test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      matrix:
+        service:
+          - name: auth
+            pkg: "@tradosphere/service-auth"
+            target: api-runtime
+            port: 4001
+            cmd: services/auth/dist/index.js
+          - name: market-data
+            pkg: "@tradosphere/service-market-data"
+            target: api-runtime
+            port: 4002
+            cmd: services/market-data/dist/index.js
+          - name: education
+            pkg: "@tradosphere/service-education"
+            target: api-runtime
+            port: 4003
+            cmd: services/education/dist/index.js
+          - name: portfolio
+            pkg: "@tradosphere/service-portfolio"
+            target: api-runtime
+            port: 4004
+            cmd: services/portfolio/dist/index.js
+          - name: analytics
+            pkg: "@tradosphere/service-analytics"
+            target: api-runtime
+            port: 4005
+            cmd: services/analytics/dist/index.js
+          - name: api
+            pkg: "@tradosphere/api"
+            target: api-runtime
+            port: 4000
+            cmd: apps/api/dist/index.js
+          - name: web
+            pkg: "@tradosphere/web"
+            target: web-runtime
+            port: 3000
+            cmd: ""
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Prune with turbo
+        run: |
+          pnpm exec turbo prune ${{ matrix.service.pkg }} --docker --out-dir=/tmp/pruned/${{ matrix.service.name }}
+          # Copy required config files into build context
+          cp pnpm-workspace.yaml turbo.json /tmp/pruned/${{ matrix.service.name }}/
+
+      - name: Build & Push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: /tmp/pruned/${{ matrix.service.name }}
+          file: docker/production/Dockerfile
+          target: ${{ matrix.service.target }}
+          build-args: |
+            PKG_FILTER=${{ matrix.service.pkg }}
+            SERVICE_PORT=${{ matrix.service.port }}
+            CMD_PATH=${{ matrix.service.cmd }}
+          push: true
+          tags: |
+            ghcr.io/tradosphere/${{ matrix.service.name }}:${{ github.sha }}
+            ghcr.io/tradosphere/${{ matrix.service.name }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ─── Deploy to Production (main only) ─────────────────────────────────
+  deploy:
+    name: Deploy to Production
+    needs: docker-build
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Copy deployment files to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          source: "docker/production/*"
+          target: "~/tradosphere"
+          strip_components: 0
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.1.0
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            cd ~/tradosphere/docker/production
+
+            # Write .env from GitHub secrets
+            cat > .env << 'ENVEOF'
+            DOMAIN=${{ secrets.DOMAIN }}
+            POSTGRES_USER=tradosphere
+            POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}
+            POSTGRES_DB=tradosphere_os
+            JWT_SECRET=${{ secrets.JWT_SECRET }}
+            LOG_LEVEL=info
+            RATE_LIMIT_PER_MIN=120
+            GATEWAY_RATE_LIMIT_PER_MIN=300
+            MARKET_DATA_SYMBOLS=RELIANCE,TCS,INFY
+            PORTFOLIO_STARTING_CASH=100000
+            REGISTRY=ghcr.io
+            IMAGE_NAMESPACE=tradosphere
+            IMAGE_TAG=${{ github.sha }}
+ENVEOF
+
+            # Log in to GHCR
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+            # Pull latest images
+            docker compose pull
+
+            # Recreate changed containers
+            docker compose up -d --remove-orphans
+
+            # Clean old images
+            docker image prune -f
+
+            # Verify
+            sleep 5
+            curl -sf https://${{ secrets.DOMAIN }}/api/health && echo " — API OK"
+            curl -sf https://${{ secrets.DOMAIN }} && echo " — Web OK"
+            echo "=== Health check complete ==="

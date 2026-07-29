@@ -1,5 +1,3 @@
-version: "3.9"
-
 # Task E (Sprint 5.5): every secret/config value below is interpolated from
 # the project-root .env file -- `docker compose` auto-loads a .env sitting
 # next to this file for ${VAR} interpolation, no env_file: directive needed

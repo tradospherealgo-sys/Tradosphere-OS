@@ -1,0 +1,239 @@
+# Production deployment for Tradosphere OS
+# Usage:
+#   1. Copy .env.production.example to .env and fill in values
+#   2. docker compose -f docker/production/docker-compose.yml up -d
+#
+# Images are expected to be pre-built (via build.sh or CI/CD).
+
+services:
+
+  # ─── Reverse Proxy (SSL termination via Caddy) ─────────────────────────
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_started
+      web:
+        condition: service_started
+    networks:
+      - tradosphere
+
+  # ─── Data Stores ──────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER must be set}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB must be set}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - tradosphere
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - tradosphere
+
+  # ─── Backend Services ─────────────────────────────────────────────────
+  auth:
+    image: ${REGISTRY:-ghcr.io}/${IMAGE_NAMESPACE:-tradosphere}/auth:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set}
+      AUTH_SERVICE_PORT: 4001
+      RATE_LIMIT_PER_MIN: ${RATE_LIMIT_PER_MIN:-120}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # Port check via Node.js HTTP — any HTTP response (incl. 404) means the
+    # service is listening. Services/auth has no /health route, so a plain
+    # TCP connection check is the correct liveness test.
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:4001', r => process.exit(0)).on('error', () => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - tradosphere
+
+  market-data:
+    image: ${REGISTRY:-ghcr.io}/${IMAGE_NAMESPACE:-tradosphere}/market-data:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379
+      MARKET_DATA_SERVICE_PORT: 4002
+      MARKET_DATA_SYMBOLS: ${MARKET_DATA_SYMBOLS:-RELIANCE,TCS,INFY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # services/market-data registers GET /health, so a real HTTP check works
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:4002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    networks:
+      - tradosphere
+
+  education:
+    image: ${REGISTRY:-ghcr.io}/${IMAGE_NAMESPACE:-tradosphere}/education:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set}
+      EDUCATION_SERVICE_PORT: 4003
+    depends_on:
+      postgres:
+        condition: service_healthy    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:4003', r => process.exit(0)).on('error', () => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - tradosphere  portfolio:
+    image: ${REGISTRY:-ghcr.io}/${IMAGE_NAMESPACE:-tradosphere}/portfolio:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set}
+      PORTFOLIO_SERVICE_PORT: 4004
+      PORTFOLIO_STARTING_CASH: ${PORTFOLIO_STARTING_CASH:-100000}
+    depends_on:
+      postgres:
+        condition: service_healthy    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:4004', r => process.exit(0)).on('error', () => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - tradosphere  analytics:
+    image: ${REGISTRY:-ghcr.io}/${IMAGE_NAMESPACE:-tradosphere}/analytics:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set}
+      ANALYTICS_SERVICE_PORT: 4005
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:4005', r => process.exit(0)).on('error', () => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - tradosphere
+
+  # ─── API Gateway (Sprint 9) ───────────────────────────────────────────
+  api:
+    image: ${REGISTRY:-ghcr.io}/${IMAGE_NAMESPACE:-tradosphere}/api:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set}
+      API_PORT: 4000
+      GATEWAY_RATE_LIMIT_PER_MIN: ${GATEWAY_RATE_LIMIT_PER_MIN:-300}
+      AUTH_SERVICE_URL: http://auth:4001
+      MARKET_DATA_SERVICE_URL: http://market-data:4002
+      EDUCATION_SERVICE_URL: http://education:4003
+      PORTFOLIO_SERVICE_URL: http://portfolio:4004
+      ANALYTICS_SERVICE_URL: http://analytics:4005
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      auth:
+        condition: service_started
+      market-data:
+        condition: service_started
+      education:
+        condition: service_started
+      portfolio:
+        condition: service_started
+      analytics:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:4000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    networks:
+      - tradosphere
+
+  # ─── Next.js Frontend ──────────────────────────────────────────────────
+  web:
+    image: ${REGISTRY:-ghcr.io}/${IMAGE_NAMESPACE:-tradosphere}/web:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      NEXT_PUBLIC_API_BASE_URL: https://${DOMAIN:-localhost}/api
+      NEXT_TELEMETRY_DISABLED: 1
+    depends_on:
+      api:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    networks:
+      - tradosphere
+
+volumes:
+  postgres_data:
+  caddy_data:
+  caddy_config:
+
+networks:
+  tradosphere:
+    driver: bridge

@@ -1,11 +1,40 @@
+# ─── Dependencies ──────────────────────────────────────────
 node_modules/
+.pnpm-store/
+
+# ─── Build Output ──────────────────────────────────────────
 dist/
 build/
 .next/
 .turbo/
-.env
-.env.local
-*.log
-.DS_Store
+*.tsbuildinfo
 coverage/
+.eslintcache
+
+# ─── Environment Files (contain real secrets, NEVER commit) ─
+.env
+.env.*
+!*.env.example
+!*.env.*.example
+
+# ─── Logs ──────────────────────────────────────────────────
+*.log
+
+# ─── OS Files ──────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ─── Editor / IDE ──────────────────────────────────────────
+*.swp
+*.swo
+*~
+.idea/
+*.iml
+
+# ─── Temp / Cache ──────────────────────────────────────────
 _tmp_*
+*.cache
+
+# ─── Sprint / Archive Docs (not needed for dev or deploy) ──
+_archive/
